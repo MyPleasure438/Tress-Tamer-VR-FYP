@@ -1,0 +1,180 @@
+using UnityEngine;
+using System.Collections.Generic;
+using System.Linq;
+
+// HANDOFF NOTE (Phase 3 - Hair Clip visual effect, REWRITTEN to use a proper authored HairSphere mesh):
+// Previous iterations tried to fake a 'gathered clump' look by moving/rotating/scaling the real, rigid,
+// non-bending hair card meshes at runtime - multiple attempts (lean, clump, outward-safety-push, rotation-
+// align, shared-direction) all had real visual problems since straight rigid cards simply cannot be posed
+// into a convincing gathered/twisted shape. Replaced entirely with the same pattern the stubble system
+// already uses successfully: swap visibility to a properly authored mesh instead of faking it with math.
+//
+// What this does now: on clip attach, HIDE this zone's real hair cards (MeshRenderer.enabled = false, cards
+// stay fully intact/uncut underneath) and SHOW one HairSphere instance positioned at the clip. On detach,
+// hide the HairSphere and restore the real cards. Does not touch CuttingManager.cs, HairCardData.cs, or any
+// cutting logic - purely visual, same as before.
+//
+// SIDE EFFECT WORTH KNOWING (same as before): since the real cards are hidden (not just moved), they won't
+// be cuttable while clipped - zones become physically hard to cut by accident purely as a side effect of
+// being hidden, not any explicit block (matches the 'soft nudge only' decision).
+//
+// Already wired to all 20 ClipSocket_<Zone> GameObjects' XR Socket Interactor Select Entered/Select Exited
+// events -> OnClipAttached()/OnClipDetached(). No re-wiring needed after this change - same method names.
+[DisallowMultipleComponent]
+public class ClipZoneGatherEffect : MonoBehaviour
+{
+    [Header("Zone")]
+    [SerializeField] private HairSectionType zone;
+    [Tooltip("Character root GameObject (same one HaircutManager uses) - needed to correctly scope which cards belong to this zone.")]
+    [SerializeField] private GameObject hairCardsRoot;
+
+    [Header("Hair Sphere Visual")]
+    [Tooltip("The HairSphere prefab (twisted-knot mesh made in Blender) to show in place of this zone's real hair while clipped.")]
+    [SerializeField] private GameObject hairSpherePrefab;
+    [Tooltip("Extra outward push (meters) from the head's approximate center, so the sphere visual sits clearly on top of the scalp instead of at/inside the surface, regardless of exactly where the clip's own pivot sits.")]
+    [SerializeField] private float outwardSafetyMargin = 0.02f;
+    [Tooltip("Uniform scale applied to the spawned HairSphere instance - tune to roughly match how much hair this zone actually has.")]
+    [SerializeField] private float hairSphereScale = 1f;
+    [Tooltip("Manual world-space offset (meters) applied on top of the clip position - use this to nudge the sphere so its actual visual base sits at the clip, since the sphere was centered on its overall bounding box, not necessarily its true attachment point. Tune by eye in Play mode.")]
+    [SerializeField] private Vector3 manualPositionOffset = Vector3.zero;
+
+    private List<MeshRenderer> _cachedRenderers;
+    private Vector3? _cachedHeadCenterWorld;
+    private GameObject _sphereInstance;
+    private List<MeshRenderer> _attachedClipRenderers;
+
+    // Shared registry other systems can check (e.g. HeadZonePlayerToggle's H-key hide/restore) so they
+    // don't blindly re-show hair cards that should stay hidden because their zone is currently clipped.
+    public static readonly HashSet<HairSectionType> CurrentlyClippedZones = new HashSet<HairSectionType>();
+
+    /// <summary>Wire to this socket's XR Socket Interactor 'Select Entered' event.</summary>
+    public void OnClipAttached(UnityEngine.XR.Interaction.Toolkit.SelectEnterEventArgs args)
+    {
+        Transform clipTransform = (args.interactableObject as Component)?.transform;
+        if (clipTransform == null)
+            return;
+
+        CacheRenderersIfNeeded();
+        CurrentlyClippedZones.Add(zone);
+
+        foreach (var renderer in _cachedRenderers)
+        {
+            if (renderer != null)
+                renderer.enabled = false;
+        }
+
+        EnsureSphereInstanceExists();
+
+        if (_sphereInstance != null)
+        {
+            // Use the SOCKET's own fixed position (this GameObject), not wherever the physical clip
+            // object happens to be sitting - guarantees it always shares the exact same position as the
+            // socket regardless of the clip's precise snap position.
+            Vector3 socketPosition = transform.position;
+            Vector3 headCenter = _cachedHeadCenterWorld ?? socketPosition;
+            Vector3 outwardDir = (socketPosition - headCenter);
+            outwardDir = outwardDir.sqrMagnitude > 0.0001f ? outwardDir.normalized : Vector3.up;
+            Vector3 desiredWorldPosition = socketPosition + outwardDir * outwardSafetyMargin + manualPositionOffset;
+
+            _sphereInstance.SetActive(true);
+            _sphereInstance.transform.position = desiredWorldPosition;
+            _sphereInstance.transform.localScale = Vector3.one * hairSphereScale;
+
+            // Self-correcting fix: whatever prefab is assigned might have its own baked-in offset on its
+            // root or children (this has happened repeatedly with different HairBun prefab versions) -
+            // instead of trusting the prefab's pivot to be meaningful, measure where its actual visible
+            // mesh ended up and nudge the whole instance so that measured center lands exactly on the
+            // desired position, regardless of any internal offset the prefab happens to have.
+            var instanceRenderers = _sphereInstance.GetComponentsInChildren<MeshRenderer>(true);
+            if (instanceRenderers.Length > 0)
+            {
+                Bounds combined = instanceRenderers[0].bounds;
+                foreach (var r in instanceRenderers)
+                    combined.Encapsulate(r.bounds);
+
+                Vector3 correction = desiredWorldPosition - combined.center;
+                _sphereInstance.transform.position += correction;
+            }
+        }
+
+        // Hide the physical clip's own renderer while attached - HairBunType2 already includes its own
+        // clip mesh baked in, so showing both at once would look like two overlapping clips.
+        _attachedClipRenderers = new List<MeshRenderer>(clipTransform.GetComponentsInChildren<MeshRenderer>(true));
+        foreach (var r in _attachedClipRenderers)
+        {
+            if (r != null)
+                r.enabled = false;
+        }
+    }
+
+    /// <summary>Wire to this socket's XR Socket Interactor 'Select Exited' event.</summary>
+    public void OnClipDetached(UnityEngine.XR.Interaction.Toolkit.SelectExitEventArgs args)
+    {
+        CurrentlyClippedZones.Remove(zone);
+
+        if (_sphereInstance != null)
+            _sphereInstance.SetActive(false);
+
+        if (_cachedRenderers != null)
+        {
+            foreach (var renderer in _cachedRenderers)
+            {
+                if (renderer != null)
+                    renderer.enabled = true;
+            }
+        }
+
+        // Restore the physical clip's own visual now that it's been removed from this zone.
+        if (_attachedClipRenderers != null)
+        {
+            foreach (var r in _attachedClipRenderers)
+            {
+                if (r != null)
+                    r.enabled = true;
+            }
+            _attachedClipRenderers = null;
+        }
+    }
+
+    private void EnsureSphereInstanceExists()
+    {
+        if (_sphereInstance != null || hairSpherePrefab == null)
+            return;
+
+        _sphereInstance = Instantiate(hairSpherePrefab, transform);
+        _sphereInstance.name = "HairSphereVisual_" + zone;
+        _sphereInstance.SetActive(false);
+    }
+
+    private void CacheRenderersIfNeeded()
+    {
+        if (_cachedRenderers != null)
+            return;
+
+        _cachedRenderers = new List<MeshRenderer>();
+
+        if (hairCardsRoot == null)
+            return;
+
+        var allCards = hairCardsRoot.GetComponentsInChildren<HairCardData>(true);
+
+        if (_cachedHeadCenterWorld == null && allCards.Length > 0)
+        {
+            Vector3 sum = Vector3.zero;
+            foreach (var c in allCards)
+                sum += c.transform.position;
+            _cachedHeadCenterWorld = sum / allCards.Length;
+        }
+
+        var cardsInZone = allCards.Where(c => c.Section == zone);
+
+        foreach (var card in cardsInZone)
+        {
+            // Include child renderers too - SegmentedHairCard generates the actual visible cut-up segments
+            // at runtime under a child '_GeneratedHairSegments' object, which may be what's really drawing
+            // once in Play mode, not just the card's own top-level MeshRenderer.
+            var renderers = card.GetComponentsInChildren<MeshRenderer>(true);
+            _cachedRenderers.AddRange(renderers);
+        }
+    }
+}

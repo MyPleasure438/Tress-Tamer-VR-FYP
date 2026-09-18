@@ -1,0 +1,76 @@
+using System;
+using UnityEngine;
+
+// HANDOFF NOTE (Phase 1 - Training Guide):
+// Shared small data types for the beginner training guide system.
+// Nothing here touches Clipper/Comb/Brush/HaircutManager/EvaluationSystem internals -
+// TrainingGuideManager only READS from HaircutManager/EvaluationSystem through their existing public API.
+
+// Which tool the guide recommends for a given step. 'Any' means no strong recommendation.
+public enum RecommendedTool
+{
+    Any,
+    Clipper,
+    Scissor,
+    Comb
+}
+
+// One authored override for a specific haircut + zone combination.
+// Optional: if you don't add any of these, TrainingGuideManager auto-generates
+// a sensible step (tool + instruction text) from HaircutManager's target length for that zone.
+[Serializable]
+public class TrainingStepDefinition
+{
+    public HairSectionType Zone;
+    public RecommendedTool Tool = RecommendedTool.Any;
+
+    [TextArea(2, 4)]
+    [Tooltip("Leave empty to auto-generate instruction text from the target length instead.")]
+    public string InstructionOverride;
+}
+
+// Optional per-haircut authored step list + order. Only needed if you want to override
+// the auto-generated default order/tool/instructions for a specific HaircutStyle.
+[Serializable]
+public class HaircutStyleStepConfig
+{
+    public HaircutStyle Style;
+    public TrainingStepDefinition[] Steps;
+}
+
+// Resolved runtime info for whatever step the player is currently on.
+// This is what VRTrainingGuidePanel reads to draw the UI - it never touches HaircutManager directly.
+[Serializable]
+public struct TrainingStepInfo
+{
+    public int StepNumber;      // 1-based, for display ("Step 3 / 8")
+    public int TotalSteps;
+    public HairSectionType Zone;
+    public string ZoneDisplayName;
+    public RecommendedTool Tool;
+    public string Instruction;
+    public float TargetLengthMeters;
+    public float TargetLengthCm => TargetLengthMeters * 100f;
+    public bool HasValidTarget;
+}
+
+// Result of an optional, non-blocking zone check (see TrainingGuideManager.CheckCurrentZoneOptional).
+// This is intentionally coarse (reuses EvaluationSystem's 7-zone Stage1EvaluationZone grouping) -
+// it's a 'roughly on track?' checkpoint for the guide, not a replacement for the real EvaluationSystem score.
+[Serializable]
+public struct TrainingZoneCheckResult
+{
+    public bool HasData;
+    public string Summary;
+
+    // Coarse cross-check using EvaluationSystem's existing 7-zone grouping (e.g. all of
+    // Fringe/FringeLeft/FringeMiddle/FringeRight combined into one 'Fringe' score).
+    public float ZoneScorePercent;
+
+    // Specific breakdown for the EXACT HairSectionType the player is currently on
+    // (e.g. FringeMiddle specifically, not the whole Fringe group).
+    public int SpecificZoneTotalCards;
+    public int SpecificZoneCorrectCards;
+    public int SpecificZoneTooLongCards;
+    public int SpecificZoneTooShortCards;
+}

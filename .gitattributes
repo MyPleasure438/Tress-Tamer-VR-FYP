@@ -1,0 +1,4 @@
+# Auto detect text files and perform LF normalization
+* text=auto
+Assets/barbershop[[:space:]]new[[:space:]]installed[[:space:]]CORRECT[[:space:]]Long[[:space:]]hair[[:space:]]cards[[:space:]]And[[:space:]]Separated.unity filter=lfs diff=lfs merge=lfs -text
+*.fbx filter=lfs diff=lfs merge=lfs -text

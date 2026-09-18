@@ -1,0 +1,794 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &6035920327657575388
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 2536900491226296297}
+  - component: {fileID: 1057745249830299529}
+  m_Layer: 0
+  m_Name: HaircutManager
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &2536900491226296297
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6035920327657575388}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -3.20669, y: 0, z: -1.32494}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &1057745249830299529
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 6035920327657575388}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d77cd929b65232447a72df7e7f825395, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::HaircutManager
+  activeHairstyle: 13
+  trainingMode: 0
+  hairCardsRoot: {fileID: 0}
+  applyTargetsOnStart: 1
+  assignSectionsFromNamesBeforeApplyingTargets: 1
+  showPerfectHaircutOnStart: 1
+  hairCapController: {fileID: 0}
+  applyHairCapLookOnStart: 1
+  applyHairCapLookWhenChangingHaircut: 1
+  targetLengthMode: 2
+  uniformTargetLength: 0.06
+  customSectionTargetLengths:
+  - Section: 4
+    TargetLength: 0.035
+  - Section: 5
+    TargetLength: 0.035
+  - Section: 6
+    TargetLength: 0.018
+  - Section: 7
+    TargetLength: 0.035
+  - Section: 8
+    TargetLength: 0.06
+  - Section: 9
+    TargetLength: 0.06
+  - Section: 10
+    TargetLength: 0.09
+  - Section: 11
+    TargetLength: 0.06
+  - Section: 12
+    TargetLength: 0.09
+  - Section: 13
+    TargetLength: 0.12
+  - Section: 14
+    TargetLength: 0.018
+  - Section: 15
+    TargetLength: 0.035
+  - Section: 16
+    TargetLength: 0.018
+  - Section: 17
+    TargetLength: 0.035
+  - Section: 18
+    TargetLength: 0.06
+  - Section: 19
+    TargetLength: 0.09
+  - Section: 20
+    TargetLength: 0.12
+  - Section: 21
+    TargetLength: 0.035
+  - Section: 22
+    TargetLength: 0.035
+  - Section: 23
+    TargetLength: 0.035
+  - Section: 24
+    TargetLength: 0.035
+  targetTolerance: 0.0025
+  hairstyleTemplates:
+  - Style: 0
+    TargetLengthMode: 2
+    UniformTargetLength: 0.0075
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.0075
+    - Section: 5
+      TargetLength: 0.0075
+    - Section: 6
+      TargetLength: 0.0075
+    - Section: 7
+      TargetLength: 0.0075
+    - Section: 8
+      TargetLength: 0.0075
+    - Section: 9
+      TargetLength: 0.0075
+    - Section: 10
+      TargetLength: 0.0075
+    - Section: 11
+      TargetLength: 0.0075
+    - Section: 12
+      TargetLength: 0.0075
+    - Section: 13
+      TargetLength: 0.0075
+    - Section: 14
+      TargetLength: 0.0075
+    - Section: 15
+      TargetLength: 0.0075
+    - Section: 16
+      TargetLength: 0.0075
+    - Section: 17
+      TargetLength: 0.0075
+    - Section: 18
+      TargetLength: 0.0075
+    - Section: 19
+      TargetLength: 0.0075
+    - Section: 20
+      TargetLength: 0.0075
+    - Section: 21
+      TargetLength: 0.0075
+    - Section: 22
+      TargetLength: 0.0075
+    - Section: 23
+      TargetLength: 0.0075
+    - Section: 24
+      TargetLength: 0.0075
+  - Style: 1
+    TargetLengthMode: 2
+    UniformTargetLength: 0.025
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.025
+    - Section: 5
+      TargetLength: 0.025
+    - Section: 6
+      TargetLength: 0.025
+    - Section: 7
+      TargetLength: 0.025
+    - Section: 8
+      TargetLength: 0.025
+    - Section: 9
+      TargetLength: 0.025
+    - Section: 10
+      TargetLength: 0.025
+    - Section: 11
+      TargetLength: 0.025
+    - Section: 12
+      TargetLength: 0.025
+    - Section: 13
+      TargetLength: 0.025
+    - Section: 14
+      TargetLength: 0.025
+    - Section: 15
+      TargetLength: 0.025
+    - Section: 16
+      TargetLength: 0.025
+    - Section: 17
+      TargetLength: 0.025
+    - Section: 18
+      TargetLength: 0.025
+    - Section: 19
+      TargetLength: 0.025
+    - Section: 20
+      TargetLength: 0.025
+    - Section: 21
+      TargetLength: 0.025
+    - Section: 22
+      TargetLength: 0.025
+    - Section: 23
+      TargetLength: 0.025
+    - Section: 24
+      TargetLength: 0.025
+  - Style: 2
+    TargetLengthMode: 2
+    UniformTargetLength: 0.02
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.01
+    - Section: 5
+      TargetLength: 0.01
+    - Section: 6
+      TargetLength: 0.01
+    - Section: 7
+      TargetLength: 0.018
+    - Section: 8
+      TargetLength: 0.03
+    - Section: 9
+      TargetLength: 0.03
+    - Section: 10
+      TargetLength: 0.03
+    - Section: 11
+      TargetLength: 0.03
+    - Section: 12
+      TargetLength: 0.03
+    - Section: 13
+      TargetLength: 0.03
+    - Section: 14
+      TargetLength: 0.01
+    - Section: 15
+      TargetLength: 0.01
+    - Section: 16
+      TargetLength: 0.01
+    - Section: 17
+      TargetLength: 0.01
+    - Section: 18
+      TargetLength: 0.03
+    - Section: 19
+      TargetLength: 0.03
+    - Section: 20
+      TargetLength: 0.03
+    - Section: 21
+      TargetLength: 0.01
+    - Section: 22
+      TargetLength: 0.018
+    - Section: 23
+      TargetLength: 0.01
+    - Section: 24
+      TargetLength: 0.018
+  - Style: 3
+    TargetLengthMode: 2
+    UniformTargetLength: 0.2
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.16
+    - Section: 5
+      TargetLength: 0.16
+    - Section: 6
+      TargetLength: 0.12
+    - Section: 7
+      TargetLength: 0.2
+    - Section: 8
+      TargetLength: 0.24
+    - Section: 9
+      TargetLength: 0.24
+    - Section: 10
+      TargetLength: 0.24
+    - Section: 11
+      TargetLength: 0.24
+    - Section: 12
+      TargetLength: 0.24
+    - Section: 13
+      TargetLength: 0.24
+    - Section: 14
+      TargetLength: 0.22
+    - Section: 15
+      TargetLength: 0.22
+    - Section: 16
+      TargetLength: 0.22
+    - Section: 17
+      TargetLength: 0.22
+    - Section: 18
+      TargetLength: 0.24
+    - Section: 19
+      TargetLength: 0.24
+    - Section: 20
+      TargetLength: 0.24
+    - Section: 21
+      TargetLength: 0.22
+    - Section: 22
+      TargetLength: 0.2
+    - Section: 23
+      TargetLength: 0.22
+    - Section: 24
+      TargetLength: 0.2
+  - Style: 4
+    TargetLengthMode: 2
+    UniformTargetLength: 0.3
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.26
+    - Section: 5
+      TargetLength: 0.26
+    - Section: 6
+      TargetLength: 0.22
+    - Section: 7
+      TargetLength: 0.3
+    - Section: 8
+      TargetLength: 0.34
+    - Section: 9
+      TargetLength: 0.34
+    - Section: 10
+      TargetLength: 0.34
+    - Section: 11
+      TargetLength: 0.34
+    - Section: 12
+      TargetLength: 0.34
+    - Section: 13
+      TargetLength: 0.34
+    - Section: 14
+      TargetLength: 0.32
+    - Section: 15
+      TargetLength: 0.32
+    - Section: 16
+      TargetLength: 0.32
+    - Section: 17
+      TargetLength: 0.32
+    - Section: 18
+      TargetLength: 0.34
+    - Section: 19
+      TargetLength: 0.34
+    - Section: 20
+      TargetLength: 0.34
+    - Section: 21
+      TargetLength: 0.32
+    - Section: 22
+      TargetLength: 0.3
+    - Section: 23
+      TargetLength: 0.32
+    - Section: 24
+      TargetLength: 0.3
+  - Style: 5
+    TargetLengthMode: 2
+    UniformTargetLength: 0.26
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.22
+    - Section: 5
+      TargetLength: 0.22
+    - Section: 6
+      TargetLength: 0.18
+    - Section: 7
+      TargetLength: 0.22
+    - Section: 8
+      TargetLength: 0.28
+    - Section: 9
+      TargetLength: 0.28
+    - Section: 10
+      TargetLength: 0.28
+    - Section: 11
+      TargetLength: 0.34
+    - Section: 12
+      TargetLength: 0.34
+    - Section: 13
+      TargetLength: 0.34
+    - Section: 14
+      TargetLength: 0.3
+    - Section: 15
+      TargetLength: 0.3
+    - Section: 16
+      TargetLength: 0.3
+    - Section: 17
+      TargetLength: 0.3
+    - Section: 18
+      TargetLength: 0.28
+    - Section: 19
+      TargetLength: 0.28
+    - Section: 20
+      TargetLength: 0.28
+    - Section: 21
+      TargetLength: 0.22
+    - Section: 22
+      TargetLength: 0.22
+    - Section: 23
+      TargetLength: 0.22
+    - Section: 24
+      TargetLength: 0.22
+  - Style: 6
+    TargetLengthMode: 2
+    UniformTargetLength: 0.06
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.012
+    - Section: 5
+      TargetLength: 0.012
+    - Section: 6
+      TargetLength: 0.006
+    - Section: 7
+      TargetLength: 0.025
+    - Section: 8
+      TargetLength: 0.13
+    - Section: 9
+      TargetLength: 0.13
+    - Section: 10
+      TargetLength: 0.13
+    - Section: 11
+      TargetLength: 0.13
+    - Section: 12
+      TargetLength: 0.13
+    - Section: 13
+      TargetLength: 0.13
+    - Section: 14
+      TargetLength: 0.006
+    - Section: 15
+      TargetLength: 0.012
+    - Section: 16
+      TargetLength: 0.006
+    - Section: 17
+      TargetLength: 0.012
+    - Section: 18
+      TargetLength: 0.13
+    - Section: 19
+      TargetLength: 0.13
+    - Section: 20
+      TargetLength: 0.13
+    - Section: 21
+      TargetLength: 0.012
+    - Section: 22
+      TargetLength: 0.025
+    - Section: 23
+      TargetLength: 0.012
+    - Section: 24
+      TargetLength: 0.025
+  - Style: 7
+    TargetLengthMode: 2
+    UniformTargetLength: 0.06
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.012
+    - Section: 5
+      TargetLength: 0.012
+    - Section: 6
+      TargetLength: 0.006
+    - Section: 7
+      TargetLength: 0.012
+    - Section: 8
+      TargetLength: 0.14
+    - Section: 9
+      TargetLength: 0.14
+    - Section: 10
+      TargetLength: 0.14
+    - Section: 11
+      TargetLength: 0.16
+    - Section: 12
+      TargetLength: 0.16
+    - Section: 13
+      TargetLength: 0.16
+    - Section: 14
+      TargetLength: 0.006
+    - Section: 15
+      TargetLength: 0.012
+    - Section: 16
+      TargetLength: 0.006
+    - Section: 17
+      TargetLength: 0.012
+    - Section: 18
+      TargetLength: 0.14
+    - Section: 19
+      TargetLength: 0.16
+    - Section: 20
+      TargetLength: 0.14
+    - Section: 21
+      TargetLength: 0.012
+    - Section: 22
+      TargetLength: 0.012
+    - Section: 23
+      TargetLength: 0.012
+    - Section: 24
+      TargetLength: 0.012
+  - Style: 8
+    TargetLengthMode: 2
+    UniformTargetLength: 0.06
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.018
+    - Section: 5
+      TargetLength: 0.018
+    - Section: 6
+      TargetLength: 0.008
+    - Section: 7
+      TargetLength: 0.018
+    - Section: 8
+      TargetLength: 0.11
+    - Section: 9
+      TargetLength: 0.11
+    - Section: 10
+      TargetLength: 0.006
+    - Section: 11
+      TargetLength: 0.11
+    - Section: 12
+      TargetLength: 0.11
+    - Section: 13
+      TargetLength: 0.006
+    - Section: 14
+      TargetLength: 0.018
+    - Section: 15
+      TargetLength: 0.11
+    - Section: 16
+      TargetLength: 0.006
+    - Section: 17
+      TargetLength: 0.006
+    - Section: 18
+      TargetLength: 0.11
+    - Section: 19
+      TargetLength: 0.11
+    - Section: 20
+      TargetLength: 0.006
+    - Section: 21
+      TargetLength: 0.018
+    - Section: 22
+      TargetLength: 0.018
+    - Section: 23
+      TargetLength: 0.006
+    - Section: 24
+      TargetLength: 0.006
+  - Style: 9
+    TargetLengthMode: 2
+    UniformTargetLength: 0.03
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.055
+    - Section: 5
+      TargetLength: 0.02
+    - Section: 6
+      TargetLength: 0.006
+    - Section: 7
+      TargetLength: 0.035
+    - Section: 8
+      TargetLength: 0.055
+    - Section: 9
+      TargetLength: 0.055
+    - Section: 10
+      TargetLength: 0.055
+    - Section: 11
+      TargetLength: 0.055
+    - Section: 12
+      TargetLength: 0.055
+    - Section: 13
+      TargetLength: 0.055
+    - Section: 14
+      TargetLength: 0.006
+    - Section: 15
+      TargetLength: 0.02
+    - Section: 16
+      TargetLength: 0.006
+    - Section: 17
+      TargetLength: 0.02
+    - Section: 18
+      TargetLength: 0.055
+    - Section: 19
+      TargetLength: 0.055
+    - Section: 20
+      TargetLength: 0.055
+    - Section: 21
+      TargetLength: 0.02
+    - Section: 22
+      TargetLength: 0.035
+    - Section: 23
+      TargetLength: 0.02
+    - Section: 24
+      TargetLength: 0.035
+  - Style: 10
+    TargetLengthMode: 2
+    UniformTargetLength: 0.025
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.05
+    - Section: 5
+      TargetLength: 0.012
+    - Section: 6
+      TargetLength: 0.004
+    - Section: 7
+      TargetLength: 0.03
+    - Section: 8
+      TargetLength: 0.05
+    - Section: 9
+      TargetLength: 0.05
+    - Section: 10
+      TargetLength: 0.05
+    - Section: 11
+      TargetLength: 0.05
+    - Section: 12
+      TargetLength: 0.05
+    - Section: 13
+      TargetLength: 0.05
+    - Section: 14
+      TargetLength: 0.004
+    - Section: 15
+      TargetLength: 0.012
+    - Section: 16
+      TargetLength: 0.004
+    - Section: 17
+      TargetLength: 0.012
+    - Section: 18
+      TargetLength: 0.05
+    - Section: 19
+      TargetLength: 0.05
+    - Section: 20
+      TargetLength: 0.05
+    - Section: 21
+      TargetLength: 0.012
+    - Section: 22
+      TargetLength: 0.03
+    - Section: 23
+      TargetLength: 0.012
+    - Section: 24
+      TargetLength: 0.03
+  - Style: 11
+    TargetLengthMode: 2
+    UniformTargetLength: 0.018
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.045
+    - Section: 5
+      TargetLength: 0.008
+    - Section: 6
+      TargetLength: 0.003
+    - Section: 7
+      TargetLength: 0.02
+    - Section: 8
+      TargetLength: 0.045
+    - Section: 9
+      TargetLength: 0.045
+    - Section: 10
+      TargetLength: 0.045
+    - Section: 11
+      TargetLength: 0.045
+    - Section: 12
+      TargetLength: 0.045
+    - Section: 13
+      TargetLength: 0.045
+    - Section: 14
+      TargetLength: 0.003
+    - Section: 15
+      TargetLength: 0.008
+    - Section: 16
+      TargetLength: 0.003
+    - Section: 17
+      TargetLength: 0.008
+    - Section: 18
+      TargetLength: 0.045
+    - Section: 19
+      TargetLength: 0.045
+    - Section: 20
+      TargetLength: 0.045
+    - Section: 21
+      TargetLength: 0.008
+    - Section: 22
+      TargetLength: 0.02
+    - Section: 23
+      TargetLength: 0.008
+    - Section: 24
+      TargetLength: 0.02
+  - Style: 12
+    TargetLengthMode: 2
+    UniformTargetLength: 0.24
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.22
+    - Section: 5
+      TargetLength: 0.22
+    - Section: 6
+      TargetLength: 0.18
+    - Section: 7
+      TargetLength: 0.22
+    - Section: 8
+      TargetLength: 0.22
+    - Section: 9
+      TargetLength: 0.22
+    - Section: 10
+      TargetLength: 0.32
+    - Section: 11
+      TargetLength: 0.26
+    - Section: 12
+      TargetLength: 0.26
+    - Section: 13
+      TargetLength: 0.32
+    - Section: 14
+      TargetLength: 0.22
+    - Section: 15
+      TargetLength: 0.22
+    - Section: 16
+      TargetLength: 0.32
+    - Section: 17
+      TargetLength: 0.32
+    - Section: 18
+      TargetLength: 0.22
+    - Section: 19
+      TargetLength: 0.22
+    - Section: 20
+      TargetLength: 0.32
+    - Section: 21
+      TargetLength: 0.22
+    - Section: 22
+      TargetLength: 0.22
+    - Section: 23
+      TargetLength: 0.32
+    - Section: 24
+      TargetLength: 0.32
+  - Style: 13
+    TargetLengthMode: 2
+    UniformTargetLength: 0.06
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.035
+    - Section: 5
+      TargetLength: 0.035
+    - Section: 6
+      TargetLength: 0.018
+    - Section: 7
+      TargetLength: 0.035
+    - Section: 8
+      TargetLength: 0.06
+    - Section: 9
+      TargetLength: 0.06
+    - Section: 10
+      TargetLength: 0.09
+    - Section: 11
+      TargetLength: 0.06
+    - Section: 12
+      TargetLength: 0.09
+    - Section: 13
+      TargetLength: 0.12
+    - Section: 14
+      TargetLength: 0.018
+    - Section: 15
+      TargetLength: 0.035
+    - Section: 16
+      TargetLength: 0.018
+    - Section: 17
+      TargetLength: 0.035
+    - Section: 18
+      TargetLength: 0.06
+    - Section: 19
+      TargetLength: 0.09
+    - Section: 20
+      TargetLength: 0.12
+    - Section: 21
+      TargetLength: 0.035
+    - Section: 22
+      TargetLength: 0.035
+    - Section: 23
+      TargetLength: 0.035
+    - Section: 24
+      TargetLength: 0.035
+  - Style: 14
+    TargetLengthMode: 2
+    UniformTargetLength: 0.12
+    CustomSectionTargetLengths:
+    - Section: 4
+      TargetLength: 0.06
+    - Section: 5
+      TargetLength: 0.06
+    - Section: 6
+      TargetLength: 0.015
+    - Section: 7
+      TargetLength: 0.06
+    - Section: 8
+      TargetLength: 0.12
+    - Section: 9
+      TargetLength: 0.12
+    - Section: 10
+      TargetLength: 0.12
+    - Section: 11
+      TargetLength: 0.08
+    - Section: 12
+      TargetLength: 0.12
+    - Section: 13
+      TargetLength: 0.26
+    - Section: 14
+      TargetLength: 0.06
+    - Section: 15
+      TargetLength: 0.08
+    - Section: 16
+      TargetLength: 0.2
+    - Section: 17
+      TargetLength: 0.26
+    - Section: 18
+      TargetLength: 0.12
+    - Section: 19
+      TargetLength: 0.12
+    - Section: 20
+      TargetLength: 0.12
+    - Section: 21
+      TargetLength: 0.06
+    - Section: 22
+      TargetLength: 0.06
+    - Section: 23
+      TargetLength: 0.2
+    - Section: 24
+      TargetLength: 0.2
+  previousActiveHairstyle: 13
+  hasInitializedTemplateMemory: 1

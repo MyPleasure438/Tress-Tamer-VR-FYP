@@ -1,0 +1,356 @@
+using System;
+using UnityEngine;
+
+// HANDOFF NOTE:
+// Active performance path for hair shortening. Each card owns pre-generated segment objects;
+// cutting hides/disables segments instead of slicing meshes at runtime. One-segment cards cannot get shorter.
+public class SegmentedHairCard : MonoBehaviour
+{
+    [SerializeField] private HairCardData hairCardData;
+    [SerializeField] private HairCardSegment[] segments;
+    [SerializeField] private bool disableCutSegments = true;
+    [SerializeField] private bool disableSegmentCollidersAfterCut = true;
+    // Keep this enabled unless segment order is manually authored. Cutting assumes index 0 is closest to the root.
+    [SerializeField] private bool autoSortSegmentsFromRootToTip = true;
+
+    private int currentCutStartIndex;
+
+    // Fires exactly once when this card newly reaches minimum segment length (fully cut for gameplay purposes).
+    public event Action OnReachedMinimumLength;
+    private bool hasFiredMinimumLengthEvent;
+
+    public HairCardData HairCardData
+    {
+        get
+        {
+            if (hairCardData == null)
+                hairCardData = GetComponent<HairCardData>();
+
+            return hairCardData;
+        }
+    }
+
+    public HairCardSegment[] Segments => segments;
+
+    public int CurrentCutStartIndex => currentCutStartIndex;
+
+    public bool IsAtMinimumSegmentLength
+    {
+        get
+        {
+            return segments != null && segments.Length > 0 && currentCutStartIndex <= 1;
+        }
+    }
+
+    private void Awake()
+    {
+        InitializeSegments();
+    }
+
+    private void OnValidate()
+    {
+        InitializeSegments();
+    }
+
+    public void SetSegments(HairCardSegment[] newSegments)
+    {
+        segments = newSegments;
+        InitializeSegments();
+    }
+
+    private void InitializeSegments()
+    {
+        if (segments == null)
+        {
+            currentCutStartIndex = 0;
+            return;
+        }
+
+        if (autoSortSegmentsFromRootToTip)
+            SortSegmentsFromRootToTip();
+
+        currentCutStartIndex = GetFirstAlreadyCutSegmentIndex();
+
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (segments[i] == null)
+                continue;
+
+            segments[i].Owner = this;
+            segments[i].SegmentIndex = i;
+        }
+    }
+
+    [ContextMenu("Sort Segments From Root To Tip")]
+    public void SortSegmentsFromRootToTip()
+    {
+        if (segments == null || segments.Length <= 1)
+            return;
+
+        Vector3 root = GetSortingRootPosition();
+
+        Array.Sort(segments, (a, b) =>
+        {
+            if (a == b)
+                return 0;
+
+            if (a == null)
+                return 1;
+
+            if (b == null)
+                return -1;
+
+            float aDistance = (GetSegmentWorldCenter(a) - root).sqrMagnitude;
+            float bDistance = (GetSegmentWorldCenter(b) - root).sqrMagnitude;
+            return aDistance.CompareTo(bDistance);
+        });
+
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (segments[i] == null)
+                continue;
+
+            segments[i].Owner = this;
+            segments[i].SegmentIndex = i;
+        }
+    }
+
+    public bool CutFromSegmentIndex(int segmentIndex)
+    {
+        if (segments == null || segments.Length == 0)
+            return false;
+
+        segmentIndex = Mathf.Clamp(segmentIndex, 0, segments.Length - 1);
+
+        if (segmentIndex >= currentCutStartIndex)
+            return false;
+
+        bool cutSomething = false;
+
+        for (int i = segmentIndex; i < currentCutStartIndex; i++)
+        {
+            HairCardSegment segment = segments[i];
+
+            if (segment == null || !segment.gameObject.activeSelf)
+                continue;
+
+            if (disableSegmentCollidersAfterCut)
+                DisableColliders(segment);
+
+            if (disableCutSegments)
+                segment.gameObject.SetActive(false);
+
+            cutSomething = true;
+        }
+
+        if (!cutSomething)
+            return false;
+
+        currentCutStartIndex = segmentIndex;
+        UpdateHairLength(segmentIndex);
+        return true;
+    }
+
+    public bool CutFromSegmentIndexRespectingTarget(int segmentIndex, float targetLength, float tolerance)
+    {
+        if (segments == null || segments.Length == 0)
+            return false;
+
+        HairCardData data = HairCardData;
+
+        if (data == null || data.OriginalLength <= 0f || targetLength <= 0f)
+            return CutFromSegmentIndex(segmentIndex);
+
+        float safeTolerance = Mathf.Max(0f, tolerance);
+        float minimumAllowedLength = Mathf.Max(0f, targetLength - safeTolerance);
+
+        if (data.CurrentLength <= targetLength + safeTolerance)
+            return false;
+
+        float minimumKeptRatio = Mathf.Clamp01(minimumAllowedLength / data.OriginalLength);
+        int minimumKeptSegmentIndex = Mathf.CeilToInt(minimumKeptRatio * segments.Length);
+        minimumKeptSegmentIndex = Mathf.Clamp(minimumKeptSegmentIndex, 0, segments.Length - 1);
+
+        return CutFromSegmentIndex(Mathf.Max(segmentIndex, minimumKeptSegmentIndex));
+    }
+
+    public void SetVisibleLength(float targetLength)
+    {
+        if (segments == null || segments.Length == 0)
+            return;
+
+        HairCardData data = HairCardData;
+
+        if (data == null || data.OriginalLength <= 0f)
+            return;
+
+        float keptRatio = Mathf.Clamp01(targetLength / data.OriginalLength);
+        int firstHiddenSegmentIndex = Mathf.RoundToInt(keptRatio * segments.Length);
+        firstHiddenSegmentIndex = Mathf.Clamp(firstHiddenSegmentIndex, 1, segments.Length);
+        SetFirstHiddenSegmentIndex(firstHiddenSegmentIndex);
+    }
+
+    public void SetFirstHiddenSegmentIndex(int firstHiddenSegmentIndex)
+    {
+        if (segments == null || segments.Length == 0)
+            return;
+
+        firstHiddenSegmentIndex = Mathf.Clamp(firstHiddenSegmentIndex, 0, segments.Length);
+
+        for (int i = 0; i < segments.Length; i++)
+        {
+            HairCardSegment segment = segments[i];
+
+            if (segment == null)
+                continue;
+
+            bool shouldBeVisible = i < firstHiddenSegmentIndex;
+            segment.gameObject.SetActive(shouldBeVisible);
+
+            Collider[] colliders = segment.GetComponents<Collider>();
+
+            for (int colliderIndex = 0; colliderIndex < colliders.Length; colliderIndex++)
+                colliders[colliderIndex].enabled = shouldBeVisible;
+        }
+
+        currentCutStartIndex = firstHiddenSegmentIndex;
+        UpdateHairLength(firstHiddenSegmentIndex);
+    }
+
+    public bool IsTargetBelowMinimumSegmentLength(float targetLength, float tolerance)
+    {
+        HairCardData data = HairCardData;
+
+        if (data == null || data.OriginalLength <= 0f || segments == null || segments.Length == 0)
+            return false;
+
+        float minimumSegmentLength = data.OriginalLength / segments.Length;
+        return targetLength + Mathf.Max(0f, tolerance) <= minimumSegmentLength;
+    }
+
+    public void RestoreAllSegments()
+    {
+        if (segments == null)
+            return;
+
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (segments[i] == null)
+                continue;
+
+            segments[i].gameObject.SetActive(true);
+            Collider[] colliders = segments[i].GetComponents<Collider>();
+
+            for (int colliderIndex = 0; colliderIndex < colliders.Length; colliderIndex++)
+                colliders[colliderIndex].enabled = true;
+        }
+
+        currentCutStartIndex = segments.Length;
+        hasFiredMinimumLengthEvent = false;
+
+        HairCardData data = HairCardData;
+        if (data != null)
+            data.CurrentLength = data.OriginalLength;
+    }
+
+    public void RestoreSegmentRuntimeState(int firstHiddenSegmentIndex, bool[] segmentActiveStates, bool[][] colliderEnabledStates)
+    {
+        if (segments == null || segments.Length == 0)
+            return;
+
+        currentCutStartIndex = Mathf.Clamp(firstHiddenSegmentIndex, 0, segments.Length);
+
+        for (int i = 0; i < segments.Length; i++)
+        {
+            HairCardSegment segment = segments[i];
+
+            if (segment == null)
+                continue;
+
+            if (segmentActiveStates != null && i < segmentActiveStates.Length)
+                segment.gameObject.SetActive(segmentActiveStates[i]);
+
+            Collider[] colliders = segment.GetComponents<Collider>();
+
+            for (int colliderIndex = 0; colliderIndex < colliders.Length; colliderIndex++)
+            {
+                if (colliderEnabledStates == null ||
+                    i >= colliderEnabledStates.Length ||
+                    colliderEnabledStates[i] == null ||
+                    colliderIndex >= colliderEnabledStates[i].Length)
+                    continue;
+
+                colliders[colliderIndex].enabled = colliderEnabledStates[i][colliderIndex];
+            }
+        }
+    }
+
+    private void DisableColliders(HairCardSegment segment)
+    {
+        Collider[] colliders = segment.GetComponents<Collider>();
+
+        for (int i = 0; i < colliders.Length; i++)
+            colliders[i].enabled = false;
+    }
+
+    private int GetFirstAlreadyCutSegmentIndex()
+    {
+        if (segments == null || segments.Length == 0)
+            return 0;
+
+        for (int i = 0; i < segments.Length; i++)
+        {
+            if (segments[i] == null || !segments[i].gameObject.activeSelf)
+                return i;
+        }
+
+        return segments.Length;
+    }
+
+    private Vector3 GetSortingRootPosition()
+    {
+        HairCardData data = HairCardData;
+
+        if (data != null)
+            return data.GetRootPosition();
+
+        return transform.position;
+    }
+
+    private Vector3 GetSegmentWorldCenter(HairCardSegment segment)
+    {
+        Renderer renderer = segment.GetComponent<Renderer>();
+
+        if (renderer != null)
+            return renderer.bounds.center;
+
+        Collider collider = segment.GetComponent<Collider>();
+
+        if (collider != null)
+            return collider.bounds.center;
+
+        MeshFilter meshFilter = segment.GetComponent<MeshFilter>();
+
+        if (meshFilter != null && meshFilter.sharedMesh != null)
+            return segment.transform.TransformPoint(meshFilter.sharedMesh.bounds.center);
+
+        return segment.transform.position;
+    }
+
+    private void UpdateHairLength(int cutSegmentIndex)
+    {
+        HairCardData data = HairCardData;
+
+        if (data == null || data.OriginalLength <= 0f || segments == null || segments.Length == 0)
+            return;
+
+        float keptRatio = Mathf.Clamp01((float)cutSegmentIndex / segments.Length);
+        data.CurrentLength = data.OriginalLength * keptRatio;
+
+        if (IsAtMinimumSegmentLength && !hasFiredMinimumLengthEvent)
+        {
+            hasFiredMinimumLengthEvent = true;
+            OnReachedMinimumLength?.Invoke();
+        }
+    }
+}

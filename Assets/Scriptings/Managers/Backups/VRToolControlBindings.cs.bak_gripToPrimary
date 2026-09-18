@@ -1,0 +1,215 @@
+using UnityEngine;
+using UnityEngine.InputSystem;
+using UnityEngine.XR;
+
+// HANDOFF NOTE:
+// New, self-contained script - wires physical Meta Quest controller buttons/sticks to existing actions
+// (Undo, headzone overview toggle, Clipper Training HUD toggle, guard cycling) without modifying how
+// any of those systems work internally. Polls UnityEngine.XR.InputDevices directly (the "legacy" XR
+// input API - still fully supported, not deprecated) rather than routing through new Input Actions, so
+// no .inputactions asset edits or new interactor wiring were needed.
+//
+// CONTROL SCHEME (as specified):
+// - Left Grip           -> Undo last hair change (HairUndoManager.UndoLastChangeFromUIButton)
+// - Right Grip          -> Toggle the headzone color-overview (HeadZonePlayerToggle.ToggleHeadZones)
+// - Secondary Button     -> Toggle the Clipper Training HUD - ONLY while the clipper is actually held.
+//   (Y on left hand,        Uses whichever hand is currently holding the clipper (Y if left, B if
+//    B on right hand)       right - same underlying 'secondary button' feature either way).
+// - That SAME hand's stick, left/right -> cycles the clipper guard down/up (ClipperGuardController),
+//   but ONLY while the Clipper Training HUD is visible AND the clipper is held in that hand. While
+//   that condition holds, this script also disables that hand's own locomotion action for the
+//   duration (see Locomotion Suppression below), so the stick doesn't ALSO turn/move the player at
+//   the same time - it reverts back to normal locomotion the instant the HUD is hidden or the
+//   clipper is let go.
+//
+// LOCOMOTION SUPPRESSION - HOW IT WORKS (read before wiring):
+// This project's ContinuousMoveProvider (on 'XR Origin (VR)') takes movement input from BOTH hands'
+// sticks via two separate XRInputValueReader slots, each pointing at its own InputActionReference
+// asset (found via direct inspection): the LEFT hand's slot is fed by the 'XRI Left Locomotion/Turn'
+// action, and the RIGHT hand's slot is fed by the 'XRI Right Locomotion/Move' action. Rather than
+// disabling the whole ContinuousMoveProvider (which would freeze movement for BOTH hands at once,
+// not just the one holding the clipper), this script directly calls .Disable()/.Enable() on ONLY the
+// specific InputAction for whichever hand currently needs its stick taken over - the standard, public,
+// non-reflection Input System API for temporarily turning an action off. Drag the SAME TWO
+// InputActionReference assets already assigned to ContinuousMoveProvider's Left/Right Hand Move Input
+// fields into this script's Left/Right Hand Locomotion Action fields below (do not create new ones).
+//
+// HOW TO WIRE THIS UP IN UNITY:
+// 1. Create an empty GameObject (e.g. 'VR Tool Control Bindings') anywhere in the scene.
+// 2. Add this component.
+// 3. Drag references: Undo Manager, Head Zone Toggle, Clipper Training Hud, Clipper Guard Controller,
+//    Clipper (the tool itself), Left Hand Root ('XR Origin (VR)/Left Hand Controller'), Right Hand Root
+//    ('XR Origin (VR)/Right Hand Controller'), and the two Locomotion Action references described above.
+// 4. Press Play and test in VR (or via the XR Device Simulator).
+[DisallowMultipleComponent]
+public class VRToolControlBindings : MonoBehaviour
+{
+    [Header("Required Links")]
+    [SerializeField] private HairUndoManager undoManager;
+    [SerializeField] private HeadZonePlayerToggle headZoneToggle;
+    [SerializeField] private ClipperTrainingHud clipperTrainingHud;
+    [SerializeField] private ClipperGuardController clipperGuardController;
+    [SerializeField] private Clipper clipper;
+
+    [Header("Hand Roots (for detecting which hand holds the clipper)")]
+    [Tooltip("Drag 'XR Origin (VR)/Left Hand Controller' here.")]
+    [SerializeField] private Transform leftHandRoot;
+    [Tooltip("Drag 'XR Origin (VR)/Right Hand Controller' here.")]
+    [SerializeField] private Transform rightHandRoot;
+
+    [Header("Locomotion Suppression (see handoff note above)")]
+    [Tooltip("Same asset as ContinuousMoveProvider's Left Hand Move Input -> Input Action Reference (currently 'XRI Left Locomotion/Turn').")]
+    [SerializeField] private InputActionReference leftHandLocomotionAction;
+    [Tooltip("Same asset as ContinuousMoveProvider's Right Hand Move Input -> Input Action Reference (currently 'XRI Right Locomotion/Move').")]
+    [SerializeField] private InputActionReference rightHandLocomotionAction;
+
+    [Header("Guard Stick Tuning")]
+    [Tooltip("How far the thumbstick must tilt left/right (0-1) before it counts as a guard-cycle input.")]
+    [Range(0.1f, 0.95f)]
+    [SerializeField] private float guardStickThreshold = 0.6f;
+    [Tooltip("Minimum seconds between guard cycles while the stick stays held past the threshold, so one tilt doesn't rapid-fire through every guard size.")]
+    [SerializeField] private float guardCycleCooldown = 0.35f;
+
+    private bool _prevLeftGrip;
+    private bool _prevRightGrip;
+    private bool _prevLeftSecondary;
+    private bool _prevRightSecondary;
+    private float _guardCycleCooldownTimer;
+
+    // Tracks which locomotion action (if any) THIS script currently has force-disabled, so it can be
+    // re-enabled the instant the override condition ends, and so we never touch the other hand's action.
+    private InputAction _suppressedLocomotionAction;
+
+    private void OnDisable()
+    {
+        RestoreSuppressedLocomotion();
+    }
+
+    private void Update()
+    {
+        PollUndoAndHeadzone();
+        PollClipperHudToggleAndGuardStick();
+    }
+
+    private void PollUndoAndHeadzone()
+    {
+        bool leftGrip = GetButton(XRNode.LeftHand, UnityEngine.XR.CommonUsages.gripButton);
+        if (leftGrip && !_prevLeftGrip)
+            undoManager?.UndoLastChangeFromUIButton();
+        _prevLeftGrip = leftGrip;
+
+        bool rightGrip = GetButton(XRNode.RightHand, UnityEngine.XR.CommonUsages.gripButton);
+        if (rightGrip && !_prevRightGrip)
+            headZoneToggle?.ToggleHeadZones();
+        _prevRightGrip = rightGrip;
+    }
+
+    private void PollClipperHudToggleAndGuardStick()
+    {
+        bool clipperHeld = clipper != null && clipper.IsHeld;
+
+        if (!clipperHeld)
+        {
+            // Nothing to do while the clipper isn't held - reset edge-tracking so a stale press
+            // doesn't immediately fire the instant it's picked back up, and release any locomotion
+            // override left over from the moment it was set down.
+            _prevLeftSecondary = false;
+            _prevRightSecondary = false;
+            RestoreSuppressedLocomotion();
+            return;
+        }
+
+        Transform holdingInteractor = clipper.CurrentHoldingInteractorTransform;
+        bool heldByLeft = holdingInteractor != null && leftHandRoot != null && holdingInteractor.IsChildOf(leftHandRoot);
+        bool heldByRight = holdingInteractor != null && rightHandRoot != null && holdingInteractor.IsChildOf(rightHandRoot);
+
+        if (!heldByLeft && !heldByRight)
+        {
+            RestoreSuppressedLocomotion();
+            return;
+        }
+
+        XRNode holdingNode = heldByLeft ? XRNode.LeftHand : XRNode.RightHand;
+
+        // Secondary Button = Y on the left controller, B on the right controller - same underlying
+        // feature either way, so this naturally follows whichever hand is holding the clipper.
+        bool secondaryPressed = GetButton(holdingNode, UnityEngine.XR.CommonUsages.secondaryButton);
+        bool prevSecondary = heldByLeft ? _prevLeftSecondary : _prevRightSecondary;
+
+        if (secondaryPressed && !prevSecondary)
+            clipperTrainingHud?.Toggle();
+
+        if (heldByLeft) _prevLeftSecondary = secondaryPressed;
+        else _prevRightSecondary = secondaryPressed;
+
+        bool hudVisible = clipperTrainingHud != null && clipperTrainingHud.IsVisible;
+
+        if (!hudVisible)
+        {
+            RestoreSuppressedLocomotion();
+            return;
+        }
+
+        // Guard-length stick control replaces this hand's normal locomotion for as long as the HUD
+        // stays visible and the clipper stays held in this hand.
+        InputActionReference relevantLocomotionAction = heldByLeft ? leftHandLocomotionAction : rightHandLocomotionAction;
+        SuppressLocomotion(relevantLocomotionAction);
+
+        _guardCycleCooldownTimer -= Time.deltaTime;
+
+        if (_guardCycleCooldownTimer > 0f || clipperGuardController == null)
+            return;
+
+        Vector2 stick = GetAxis2D(holdingNode, UnityEngine.XR.CommonUsages.primary2DAxis);
+
+        if (stick.x >= guardStickThreshold)
+        {
+            clipperGuardController.CycleNextGuard();
+            _guardCycleCooldownTimer = guardCycleCooldown;
+        }
+        else if (stick.x <= -guardStickThreshold)
+        {
+            clipperGuardController.CyclePreviousGuard();
+            _guardCycleCooldownTimer = guardCycleCooldown;
+        }
+    }
+
+    private void SuppressLocomotion(InputActionReference actionReference)
+    {
+        InputAction action = actionReference != null ? actionReference.action : null;
+
+        if (action == null)
+            return;
+
+        if (_suppressedLocomotionAction == action)
+            return; // already suppressing exactly this one - nothing to change.
+
+        // Switched hands or just started suppressing - restore whatever was previously suppressed
+        // (if different) before taking over the new one.
+        RestoreSuppressedLocomotion();
+
+        action.Disable();
+        _suppressedLocomotionAction = action;
+    }
+
+    private void RestoreSuppressedLocomotion()
+    {
+        if (_suppressedLocomotionAction == null)
+            return;
+
+        _suppressedLocomotionAction.Enable();
+        _suppressedLocomotionAction = null;
+    }
+
+    private static bool GetButton(XRNode node, InputFeatureUsage<bool> usage)
+    {
+        UnityEngine.XR.InputDevice device = InputDevices.GetDeviceAtXRNode(node);
+        return device.isValid && device.TryGetFeatureValue(usage, out bool value) && value;
+    }
+
+    private static Vector2 GetAxis2D(XRNode node, InputFeatureUsage<Vector2> usage)
+    {
+        UnityEngine.XR.InputDevice device = InputDevices.GetDeviceAtXRNode(node);
+        return device.isValid && device.TryGetFeatureValue(usage, out Vector2 value) ? value : Vector2.zero;
+    }
+}

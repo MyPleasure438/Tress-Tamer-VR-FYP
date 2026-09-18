@@ -1,0 +1,1744 @@
+using System.Collections.Generic;
+using System;
+using UnityEngine;
+
+public enum HaircutStyle
+{
+    Stage1_InductionCut,
+    Stage1_ButchCut,
+    Stage1_CrewCut,
+    Stage2_StandardBob,
+    Stage2_LongBob,
+    Stage2_ALineBob,
+    Stage3_DisconnectedUndercut,
+    Stage3_SlickedBackUndercut,
+    Stage3_HardPartUndercut,
+    Stage4_LowFade,
+    Stage4_MidFade,
+    Stage4_HighFade,
+    Stage5_AsymmetricalBob,
+    Stage5_SideSweptPixie,
+    Stage5_AvantGardeAngle
+}
+
+public enum HaircutTargetLengthMode
+{
+    OriginalHairWithZoneGradient,
+    UniformAllSections,
+    CustomPerSection,
+    // Appended, not inserted - keeps the first 3 values' underlying indices unchanged so nothing
+    // already serialized in the scene breaks. Separates each zone's cards into discrete height levels
+    // (bottom/middle/top, or more) with an independently authored target length per level, instead of
+    // one flat number or a continuous gradient - mirrors real bottom-to-top panel-by-panel cutting even
+    // more directly than the gradient mode.
+    LeveledPerSection
+}
+
+[Serializable]
+public class HaircutSectionTargetLength
+{
+    public HairSectionType Section;
+    [Min(0f)] public float TargetLength = 0.025f;
+}
+
+[Serializable]
+public class HaircutLeveledSectionTargetLength
+{
+    public HairSectionType Section;
+    // Index 0 = bottom-most level in this zone, last index = top-most level. Length should match
+    // HaircutManager's leveledSectionLevelCount - use 'Reset Leveled Targets From Suggested Defaults'
+    // to (re)generate this array at the correct length with sensible starting values.
+    public float[] LevelTargetLengths;
+}
+
+[Serializable]
+public class HaircutDirectionSplitSectionTargetLength
+{
+    public HairSectionType Section;
+    // Only zones that need Front/Side splitting (e.g. TopLeft, TopRight - where some cards grow toward
+    // the face and others grow down the side despite sharing one Section) need an entry here. Zones
+    // without an entry keep using the normal single-role leveled lookup, completely unaffected.
+    public float[] FrontLevelTargetLengths;
+    public float[] SideLevelTargetLengths;
+}
+
+[Serializable]
+public class HaircutDepthRow
+{
+    // One height-level's worth of depth-level targets. Index 0 = frontmost depth level in this row,
+    // last index = rearmost. Length should match HaircutManager's depthLevelCount.
+    public float[] DepthTargetLengths;
+}
+
+[Serializable]
+public class HaircutTwoAxisSectionTargetLength
+{
+    public HairSectionType Section;
+    // Outer index = height level (0 = bottom, last = top), matching leveledSectionLevelCount. Each
+    // HaircutDepthRow inside holds that height level's own front-to-back spread of targets. Only zones
+    // that genuinely need BOTH axes (e.g. LeftSideUpper, which spans a wide front-to-back area at every
+    // height) need an entry here - everything else keeps using the simpler single-axis leveled lookup.
+    public HaircutDepthRow[] HeightRows;
+}
+
+[Serializable]
+public class HaircutStyleTemplate
+{
+    public HaircutStyle Style;
+    public HaircutTargetLengthMode TargetLengthMode = HaircutTargetLengthMode.OriginalHairWithZoneGradient;
+    [Min(0f)] public float UniformTargetLength = 0.025f;
+    public HaircutSectionTargetLength[] CustomSectionTargetLengths;
+    public int LeveledSectionLevelCount = 3;
+    public HaircutLeveledSectionTargetLength[] LeveledSectionTargetLengths;
+    public HaircutDirectionSplitSectionTargetLength[] DirectionSplitSectionTargetLengths;
+    public int DepthLevelCount = 3;
+    public HaircutTwoAxisSectionTargetLength[] TwoAxisSectionTargetLengths;
+}
+
+// HANDOFF NOTE:
+// Active haircut definition manager. Stage1HaircutManager is only a compatibility wrapper for old scene objects.
+// This stores per-hairstyle target length templates and controls Practice vs Assessment behavior.
+public class HaircutManager : MonoBehaviour
+{
+    [Header("Active Haircut")]
+    [SerializeField] private HaircutStyle activeHairstyle = HaircutStyle.Stage1_ButchCut;
+    [SerializeField] private Stage1TrainingMode trainingMode = Stage1TrainingMode.Practice;
+    [SerializeField] private Transform hairCardsRoot;
+    [SerializeField] private bool applyTargetsOnStart = true;
+    [SerializeField] private bool assignSectionsFromNamesBeforeApplyingTargets = true;
+
+    [Header("Perfect Hairstyle On Play")]
+    // Debug/demo option: immediately applies the selected target lengths to show the ideal template.
+    [SerializeField] private bool showPerfectHaircutOnStart = false;
+
+    [Header("Hair Cap Visual")]
+    [SerializeField] private HairCapController hairCapController;
+    [SerializeField] private bool applyHairCapLookOnStart = true;
+    [SerializeField] private bool applyHairCapLookWhenChangingHaircut = true;
+
+    [Header("Current Target Settings")]
+    // BuiltIn = suggested defaults, Uniform = one length for all sections, Custom = per hair section.
+    [SerializeField] private HaircutTargetLengthMode targetLengthMode = HaircutTargetLengthMode.OriginalHairWithZoneGradient;
+    [SerializeField] private float uniformTargetLength = 0.025f;
+    [SerializeField] private HaircutSectionTargetLength[] customSectionTargetLengths = CreateDefaultSectionTargetLengths(0.025f);
+    [SerializeField] private float targetTolerance = 0.0025f;
+
+    [Header("Leveled Per Section (bottom/middle/top, or more)")]
+    [Tooltip("How many height levels each zone is split into. 3 = bottom/middle/top. Change this then use the context menu button below to regenerate the arrays at the new length.")]
+    [Min(2)]
+    [SerializeField] private int leveledSectionLevelCount = 3;
+    [Tooltip("Per-zone, per-level target lengths for LeveledPerSection mode. Index 0 = bottom of that zone, last index = top. Use the context menu button to generate/reset this from current suggested defaults, then hand-tune individual values here.")]
+    [SerializeField] private HaircutLeveledSectionTargetLength[] leveledSectionTargetLengths;
+
+    [Tooltip("Zones where cards within the SAME zone actually grow in very different directions (e.g. TopLeft has some cards growing toward the face, others down the side) - each such zone gets an entry here with SEPARATE level arrays for Front-leaning vs Side-leaning cards. Only add zones here that actually need this; everything else uses the normal single-role leveled lookup above.")]
+    [SerializeField] private HaircutDirectionSplitSectionTargetLength[] directionSplitSectionTargetLengths;
+
+    [Header("Two-Axis Leveled (height AND front-to-back depth)")]
+    [Tooltip("How many front-to-back depth levels each opted-in zone is split into. 3 = front/middle/back.")]
+    [Min(2)]
+    [SerializeField] private int depthLevelCount = 3;
+    [Tooltip("Zones where a SINGLE height level still spans too much front-to-back distance to use one flat value (e.g. LeftSideUpper covers a wide front-to-back area at every height). Each entry gets a full height-x-depth grid of targets. Only add zones here that genuinely need both axes; everything else uses the simpler single-axis leveled lookup.")]
+    [SerializeField] private HaircutTwoAxisSectionTargetLength[] twoAxisSectionTargetLengths;
+
+    [Header("Saved Hairstyle Templates")]
+    // Each hairstyle remembers its latest inspector values when switching away and back.
+    [SerializeField] private HaircutStyleTemplate[] hairstyleTemplates = CreateDefaultHairstyleTemplates();
+
+    [SerializeField, HideInInspector] private HaircutStyle previousActiveHairstyle;
+    [SerializeField, HideInInspector] private bool hasInitializedTemplateMemory;
+
+    public HaircutStyle ActiveHairstyle => activeHairstyle;
+    public HaircutStyle ActiveHaircut => activeHairstyle;
+    public Stage1TrainingMode TrainingMode => trainingMode;
+    // Practice mode is a hard limiter. Assessment mode lets the player overcut and scores the result later.
+    public bool ShouldLimitCutsToTarget => trainingMode == Stage1TrainingMode.Practice;
+    public float TargetTolerance => Mathf.Max(0f, targetTolerance);
+
+    private void OnValidate()
+    {
+        EnsureTemplateMemory();
+    }
+
+    private void Start()
+    {
+        EnsureTemplateMemory();
+
+        if (applyTargetsOnStart)
+            ApplyTargetsToHairCards();
+
+        // Sync stubble reveal style with whatever hairstyle is already active at Start (e.g. set via the
+        // Inspector dropdown rather than through SetActiveHairstyle()), so the two systems never disagree.
+        // Deferred one frame: Unity does not guarantee Start() order between scripts, so this avoids a race
+        // where StubbleRevealCoordinator's own Start() (which sets its style from Starting Style) could run
+        // AFTER this and silently overwrite the sync.
+        StartCoroutine(SyncStubbleRevealStyleNextFrame());
+
+        if (showPerfectHaircutOnStart)
+            ApplyPerfectHaircutToSceneHair();
+
+        if (applyHairCapLookOnStart)
+            ApplyActiveHaircutToHairCap();
+    }
+
+    [Tooltip("Optional. If assigned, selecting a Stage 1 style (Induction/Butch/Crew) here also switches which stubble mesh is revealed as hair gets cut - keeps StubbleRevealCoordinator in sync with whatever haircut is actually selected. Leave empty if not using stubble reveal.")]
+    [SerializeField] private StubbleRevealCoordinator stubbleRevealCoordinator;
+
+    public void SetActiveHairstyle(HaircutStyle hairstyle)
+    {
+        EnsureTemplateMemory();
+        // Save current inspector settings first so switching hairstyles does not lose custom section lengths.
+        SaveCurrentSettingsToTemplate(activeHairstyle);
+        activeHairstyle = hairstyle;
+        LoadTemplateIntoCurrentSettings(activeHairstyle);
+        previousActiveHairstyle = activeHairstyle;
+        ApplyTargetsToHairCards();
+        SyncStubbleRevealStyle(hairstyle);
+
+        if (applyHairCapLookWhenChangingHaircut)
+            ApplyActiveHaircutToHairCap();
+    }
+
+    private System.Collections.IEnumerator SyncStubbleRevealStyleNextFrame()
+    {
+        yield return null;
+        SyncStubbleRevealStyle(activeHairstyle);
+    }
+
+    // Keeps StubbleRevealCoordinator's active stubble mesh in sync with the Stage 1 style just selected.
+    // Does nothing for Stage 2+ styles (bobs etc.) since those do not have a stubble equivalent.
+    private void SyncStubbleRevealStyle(HaircutStyle hairstyle)
+    {
+        if (stubbleRevealCoordinator == null)
+            return;
+
+        switch (hairstyle)
+        {
+            case HaircutStyle.Stage1_InductionCut:
+                stubbleRevealCoordinator.SetActiveStyle(StubbleRevealCoordinator.StubbleStyle.Induction);
+                break;
+            case HaircutStyle.Stage1_ButchCut:
+                stubbleRevealCoordinator.SetActiveStyle(StubbleRevealCoordinator.StubbleStyle.Butch);
+                break;
+            case HaircutStyle.Stage1_CrewCut:
+                stubbleRevealCoordinator.SetActiveStyle(StubbleRevealCoordinator.StubbleStyle.Crew);
+                break;
+        }
+    }
+
+    public void SetTrainingMode(Stage1TrainingMode mode)
+    {
+        trainingMode = mode;
+    }
+
+    [ContextMenu("Use Practice Mode")]
+    public void UsePracticeMode()
+    {
+        SetTrainingMode(Stage1TrainingMode.Practice);
+    }
+
+    [ContextMenu("Use Assessment Mode")]
+    public void UseAssessmentMode()
+    {
+        SetTrainingMode(Stage1TrainingMode.Assessment);
+    }
+
+    [ContextMenu("Use Stage 1 Induction Cut")]
+    public void UseStage1InductionCut()
+    {
+        SetActiveHairstyle(HaircutStyle.Stage1_InductionCut);
+    }
+
+    [ContextMenu("Use Stage 1 Butch Cut")]
+    public void UseStage1ButchCut()
+    {
+        SetActiveHairstyle(HaircutStyle.Stage1_ButchCut);
+    }
+
+    [ContextMenu("Use Stage 1 Crew Cut")]
+    public void UseStage1CrewCut()
+    {
+        SetActiveHairstyle(HaircutStyle.Stage1_CrewCut);
+    }
+
+    [ContextMenu("Apply Targets To Hair Cards")]
+    public void ApplyTargetsToHairCards()
+    {
+        SaveCurrentSettingsToTemplate(activeHairstyle);
+
+        if (assignSectionsFromNamesBeforeApplyingTargets)
+            AssignSectionsFromObjectOrParentNames();
+
+        Transform root = hairCardsRoot != null ? hairCardsRoot : transform;
+        HairCardData[] hairCards = root.GetComponentsInChildren<HairCardData>(true);
+
+        for (int i = 0; i < hairCards.Length; i++)
+        {
+            HairCardData hairCard = hairCards[i];
+
+            if (hairCard == null || !TryGetTargetLength(hairCard, out float targetLength, out float tolerance))
+                continue;
+
+            hairCard.SetTargetLength(targetLength, tolerance);
+        }
+
+        Debug.Log($"Applied {activeHairstyle} target lengths to {hairCards.Length} hair cards.");
+    }
+
+    [ContextMenu("Restore Original Hair Length (Undo All Cuts)")]
+    public void RestoreOriginalHairLength()
+    {
+        // Safety tool: SegmentedHairCard.SetVisibleLength never destroys geometry, it only toggles
+        // segment visibility - so this is always fully recoverable, no matter how much has been cut.
+        Transform root = hairCardsRoot != null ? hairCardsRoot : transform;
+        HairCardData[] hairCards = root.GetComponentsInChildren<HairCardData>(true);
+        int restoredCount = 0;
+
+        for (int i = 0; i < hairCards.Length; i++)
+        {
+            HairCardData hairCard = hairCards[i];
+
+            if (hairCard == null || hairCard.OriginalLength <= 0f)
+                continue;
+
+            SegmentedHairCard segmentedHairCard = hairCard.GetComponent<SegmentedHairCard>();
+            if (segmentedHairCard != null)
+                segmentedHairCard.SetVisibleLength(hairCard.OriginalLength);
+
+            hairCard.CurrentLength = hairCard.OriginalLength;
+            restoredCount++;
+        }
+
+        Debug.Log($"Restored {restoredCount}/{hairCards.Length} hair cards to their original (pre-cut) length.");
+    }
+
+    [ContextMenu("Apply Perfect Haircut To Scene Hair")]
+    public void ApplyPerfectHaircutToSceneHair()
+    {
+        // Preview helper only: this modifies visible hair lengths to the current target template.
+        if (applyTargetsOnStart)
+            ApplyTargetsToHairCards();
+        else if (assignSectionsFromNamesBeforeApplyingTargets)
+            AssignSectionsFromObjectOrParentNames();
+
+        Transform root = hairCardsRoot != null ? hairCardsRoot : transform;
+        HairCardData[] hairCards = root.GetComponentsInChildren<HairCardData>(true);
+        int changedCount = 0;
+
+        for (int i = 0; i < hairCards.Length; i++)
+        {
+            HairCardData hairCard = hairCards[i];
+
+            if (hairCard == null || !TryGetTargetLength(hairCard, out float targetLength, out float tolerance))
+                continue;
+
+            SegmentedHairCard segmentedHairCard = hairCard.GetComponent<SegmentedHairCard>();
+
+            if (segmentedHairCard != null)
+            {
+                segmentedHairCard.SetVisibleLength(Mathf.Max(0f, targetLength));
+                changedCount++;
+                continue;
+            }
+
+            hairCard.CurrentLength = Mathf.Max(0f, targetLength) + Mathf.Max(0f, tolerance);
+            changedCount++;
+        }
+
+        Debug.Log($"Applied perfect {activeHairstyle} haircut to {changedCount}/{hairCards.Length} hair cards.");
+    }
+
+    [ContextMenu("Assign Sections From Object Or Parent Names")]
+    public void AssignSectionsFromObjectOrParentNames()
+    {
+        Transform root = hairCardsRoot != null ? hairCardsRoot : transform;
+        HairCardData[] hairCards = root.GetComponentsInChildren<HairCardData>(true);
+        int assignedCount = 0;
+
+        for (int i = 0; i < hairCards.Length; i++)
+        {
+            HairCardData hairCard = hairCards[i];
+
+            if (hairCard == null || !TryFindSectionInHierarchy(hairCard.transform, root, out HairSectionType section))
+                continue;
+
+            hairCard.Section = section;
+            assignedCount++;
+        }
+
+        Debug.Log($"Assigned hair sections from names for {assignedCount}/{hairCards.Length} hair cards.");
+    }
+
+    // Public accessor so other scripts (e.g. result screens) can enumerate all cards without needing
+    // to know about the private hairCardsRoot field directly.
+    public Transform HairCardsRoot => hairCardsRoot != null ? hairCardsRoot : transform;
+
+    public bool TryGetTargetLength(HairSectionType section, out float targetLength, out float tolerance)
+    {
+        tolerance = TargetTolerance;
+
+        if (targetLengthMode == HaircutTargetLengthMode.UniformAllSections)
+        {
+            targetLength = Mathf.Max(0f, uniformTargetLength);
+            return true;
+        }
+
+        if (targetLengthMode == HaircutTargetLengthMode.CustomPerSection && TryGetCustomSectionTargetLength(section, out targetLength))
+            return true;
+
+        return TryGetBuiltInTargetLength(activeHairstyle, section, out targetLength);
+    }
+
+    [Header("Within-Zone Length Gradient (bottom-to-top, currently Bob styles only)")]
+    [Tooltip("When on, cards near the bottom of a zone get a slightly shorter target and cards near the top get a slightly longer target, instead of one flat length for the whole zone - matches how real bottom-to-top panel cutting naturally leaves a gradient. Only applies to Stage2_StandardBob and Stage2_LongBob for now (the styles that have been tuned) - every other style is completely unaffected.")]
+    [SerializeField] private bool enableWithinZoneGradient = true;
+    [Tooltip("How strong the bottom-to-top spread is, as a fraction of the zone's normal flat target. 0 = no gradient (identical to old flat behavior). 0.4 = bottom is ~20% shorter and top is ~20% longer than the flat value. Tune by eye in Play mode.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float gradientRangeFraction = 0.4f;
+
+    private readonly Dictionary<HairSectionType, Vector2> _zoneHeightRangeCache = new Dictionary<HairSectionType, Vector2>();
+
+    // Per-card overload: gradient-aware for eligible styles (currently the tuned Bob styles), falls back
+    // to the exact same flat per-zone behavior as the section-only overload above for everything else.
+    // Mirrors that method's priority order exactly (Uniform -> CustomPerSection -> built-in) so behavior
+    // stays identical whenever gradient doesn't apply.
+    public bool TryGetTargetLength(HairCardData hairCard, out float targetLength, out float tolerance)
+    {
+        tolerance = TargetTolerance;
+        targetLength = 0f;
+
+        if (hairCard == null)
+            return false;
+
+        if (targetLengthMode == HaircutTargetLengthMode.UniformAllSections)
+        {
+            targetLength = Mathf.Max(0f, uniformTargetLength);
+            return true;
+        }
+
+        // Leveled Per Section is its own independent mode (not blended with the gradient math below) -
+        // each zone's cards are bucketed into discrete height levels, each with its own hand-authored
+        // target length.
+        if (targetLengthMode == HaircutTargetLengthMode.LeveledPerSection)
+        {
+            // Priority order: two-axis (most specific, for zones needing both height AND depth control)
+            // -> direction-split (for zones with genuinely different growth directions, e.g. TopLeft) ->
+            // normal single-axis leveled. Falls through cleanly for zones not opted into either overlay.
+            if (TryGetTwoAxisTargetLength(hairCard, out float twoAxisTarget))
+            {
+                targetLength = twoAxisTarget;
+                return true;
+            }
+
+            if (TryGetDirectionSplitLeveledTargetLength(hairCard, out float directionSplitTarget))
+            {
+                targetLength = directionSplitTarget;
+                return true;
+            }
+
+            if (TryGetLeveledTargetLength(hairCard, out float leveledTarget))
+            {
+                targetLength = leveledTarget;
+                return true;
+            }
+        }
+
+        // In Custom Per Section mode, use the cached custom value as the gradient's CENTER instead of
+        // bypassing gradient entirely - this way the bottom-to-top spread is built around whatever value
+        // was specifically tuned for that zone (e.g. a manually patched Fringe length), not ignored.
+        float? customCenterValue = null;
+        if (targetLengthMode == HaircutTargetLengthMode.CustomPerSection && TryGetCustomSectionTargetLength(hairCard.Section, out float customValue))
+        {
+            customCenterValue = customValue;
+        }
+
+        if (enableWithinZoneGradient && IsGradientEligibleStyle(activeHairstyle) && TryGetGradientTargetLength(hairCard, customCenterValue, out float gradientTarget))
+        {
+            targetLength = gradientTarget;
+            return true;
+        }
+
+        if (customCenterValue.HasValue)
+        {
+            targetLength = customCenterValue.Value;
+            return true;
+        }
+
+        return TryGetBuiltInTargetLength(activeHairstyle, hairCard.Section, out targetLength);
+    }
+
+    private static bool IsGradientEligibleStyle(HaircutStyle style)
+    {
+        // Scoped intentionally to only the styles that have actually been tuned/confirmed so far - every
+        // other style keeps its exact original flat behavior. Add more cases here as other styles get tuned.
+        return style == HaircutStyle.Stage2_StandardBob || style == HaircutStyle.Stage2_LongBob;
+    }
+
+    private bool TryGetGradientTargetLength(HairCardData hairCard, float? centerOverride, out float targetLength)
+    {
+        targetLength = 0f;
+
+        // Center around a custom-tuned value (Custom Per Section mode) if one was supplied, otherwise the
+        // usual code-defined default for this style/zone (Built In Haircut Defaults mode).
+        float flatValue = centerOverride ?? GetSuggestedTargetLength(activeHairstyle, hairCard.Section);
+        if (flatValue <= 0f)
+            return false;
+
+        if (!TryGetRelativeHeightInZone(hairCard, out float t))
+        {
+            // Can't compute a meaningful gradient (e.g. only one card in this zone) - fall back to the
+            // exact flat value rather than guessing, so this never produces a worse result than before.
+            targetLength = flatValue;
+            return true;
+        }
+
+        float halfRange = gradientRangeFraction * 0.5f;
+        float bottomValue = flatValue * (1f - halfRange);
+        float topValue = flatValue * (1f + halfRange);
+
+        targetLength = Mathf.Lerp(bottomValue, topValue, t);
+        return true;
+    }
+
+    // Returns this card's relative height (0 = lowest card in its zone, 1 = highest) using world-space Y
+    // as an approximation of 'bottom of zone' to 'top of zone'. Cached per zone (lazy, cleared whenever the
+    // hairstyle changes) since recomputing min/max across every card in a zone per-call would be wasteful.
+    private bool TryGetRelativeHeightInZone(HairCardData hairCard, out float t)
+    {
+        t = 0f;
+
+        if (!_zoneHeightRangeCache.TryGetValue(hairCard.Section, out Vector2 range))
+        {
+            Transform root = hairCardsRoot != null ? hairCardsRoot : transform;
+            HairCardData[] allCards = root.GetComponentsInChildren<HairCardData>(true);
+
+            float min = float.PositiveInfinity;
+            float max = float.NegativeInfinity;
+            int countInZone = 0;
+
+            for (int i = 0; i < allCards.Length; i++)
+            {
+                if (allCards[i] == null || allCards[i].Section != hairCard.Section)
+                    continue;
+
+                float y = allCards[i].RootPosition.y;
+                if (y < min) min = y;
+                if (y > max) max = y;
+                countInZone++;
+            }
+
+            range = countInZone > 1 ? new Vector2(min, max) : new Vector2(0f, 0f);
+            _zoneHeightRangeCache[hairCard.Section] = range;
+        }
+
+        if (Mathf.Approximately(range.x, range.y))
+            return false;
+
+        t = Mathf.InverseLerp(range.x, range.y, hairCard.RootPosition.y);
+        return true;
+    }
+
+    [ContextMenu("Reset Current Custom Targets From Active Hairstyle Defaults")]
+    public void ResetCurrentCustomTargetsFromActiveHairstyleDefaults()
+    {
+        HairSectionType[] sections = GetDetailedHairSections();
+        customSectionTargetLengths = new HaircutSectionTargetLength[sections.Length];
+
+        for (int i = 0; i < sections.Length; i++)
+        {
+            TryGetBuiltInTargetLength(activeHairstyle, sections[i], out float targetLength);
+            customSectionTargetLengths[i] = new HaircutSectionTargetLength
+            {
+                Section = sections[i],
+                TargetLength = targetLength
+            };
+        }
+
+        SaveCurrentSettingsToTemplate(activeHairstyle);
+    }
+
+    [ContextMenu("Set Current Custom Targets To Uniform Length")]
+    public void SetCurrentCustomTargetsToUniformLength()
+    {
+        customSectionTargetLengths = CreateDefaultSectionTargetLengths(uniformTargetLength);
+        SaveCurrentSettingsToTemplate(activeHairstyle);
+    }
+
+    [ContextMenu("Reset Two-Axis Targets (LeftSideUpper/RightSideUpper) From Suggested Defaults")]
+    public void ResetTwoAxisTargetsFromSuggestedDefaults()
+    {
+        int heights = Mathf.Max(2, leveledSectionLevelCount);
+        int depths = Mathf.Max(2, depthLevelCount);
+        HairSectionType[] wideZones = { HairSectionType.LeftSideUpper, HairSectionType.RightSideUpper };
+
+        twoAxisSectionTargetLengths = new HaircutTwoAxisSectionTargetLength[wideZones.Length];
+
+        for (int z = 0; z < wideZones.Length; z++)
+        {
+            TryGetBuiltInTargetLength(activeHairstyle, wideZones[z], out float ownDefault);
+            float halfRange = gradientRangeFraction * 0.5f;
+
+            HaircutDepthRow[] rows = new HaircutDepthRow[heights];
+            for (int h = 0; h < heights; h++)
+            {
+                float heightT = heights > 1 ? (float)h / (heights - 1) : 0f;
+                float heightCenter = Mathf.Lerp(ownDefault * (1f - halfRange), ownDefault * (1f + halfRange), heightT);
+
+                float[] depthValues = new float[depths];
+                for (int d = 0; d < depths; d++)
+                {
+                    float depthT = depths > 1 ? (float)d / (depths - 1) : 0f;
+                    // Seed a modest front-to-back spread around this row's own height-based center.
+                    depthValues[d] = Mathf.Lerp(heightCenter * 0.9f, heightCenter * 1.1f, depthT);
+                }
+
+                rows[h] = new HaircutDepthRow { DepthTargetLengths = depthValues };
+            }
+
+            twoAxisSectionTargetLengths[z] = new HaircutTwoAxisSectionTargetLength
+            {
+                Section = wideZones[z],
+                HeightRows = rows
+            };
+        }
+
+        Debug.Log($"Generated two-axis targets for {wideZones.Length} zones (LeftSideUpper, RightSideUpper) at {heights}x{depths} grid each. Hand-tune individual values in the Inspector.");
+    }
+
+    [ContextMenu("Reset Direction-Split Targets (TopLeft/TopRight) From Suggested Defaults")]
+    public void ResetDirectionSplitTargetsFromSuggestedDefaults()
+    {
+        int levels = Mathf.Max(2, leveledSectionLevelCount);
+        HairSectionType[] mixedZones = { HairSectionType.TopLeft, HairSectionType.TopRight };
+
+        directionSplitSectionTargetLengths = new HaircutDirectionSplitSectionTargetLength[mixedZones.Length];
+
+        for (int i = 0; i < mixedZones.Length; i++)
+        {
+            bool isLeft = mixedZones[i] == HairSectionType.TopLeft;
+
+            // Seed Front levels from this zone's own suggested default (roughly matches what the fringe-
+            // adjacent cards should look like), Side levels the same way but biased toward the side zone's
+            // own suggested default - both are only starting points for you to hand-tune afterward.
+            TryGetBuiltInTargetLength(activeHairstyle, mixedZones[i], out float ownDefault);
+            TryGetBuiltInTargetLength(activeHairstyle, isLeft ? HairSectionType.LeftSideUpper : HairSectionType.RightSideUpper, out float sideDefault);
+
+            float halfRange = gradientRangeFraction * 0.5f;
+
+            float[] frontLevels = new float[levels];
+            float[] sideLevels = new float[levels];
+            for (int lvl = 0; lvl < levels; lvl++)
+            {
+                float t = levels > 1 ? (float)lvl / (levels - 1) : 0f;
+                frontLevels[lvl] = Mathf.Lerp(ownDefault * (1f - halfRange), ownDefault * (1f + halfRange), t);
+                sideLevels[lvl] = Mathf.Lerp(sideDefault * (1f - halfRange), sideDefault * (1f + halfRange), t);
+            }
+
+            directionSplitSectionTargetLengths[i] = new HaircutDirectionSplitSectionTargetLength
+            {
+                Section = mixedZones[i],
+                FrontLevelTargetLengths = frontLevels,
+                SideLevelTargetLengths = sideLevels
+            };
+        }
+
+        Debug.Log($"Generated direction-split targets for {mixedZones.Length} zones (TopLeft, TopRight) at {levels} levels each x 2 roles. Hand-tune individual values in the Inspector.");
+    }
+
+    [ContextMenu("Reset Leveled Targets From Suggested Defaults")]
+    public void ResetLeveledTargetsFromSuggestedDefaults()
+    {
+        HairSectionType[] sections = GetDetailedHairSections();
+        leveledSectionTargetLengths = new HaircutLeveledSectionTargetLength[sections.Length];
+        int levels = Mathf.Max(2, leveledSectionLevelCount);
+
+        for (int i = 0; i < sections.Length; i++)
+        {
+            TryGetBuiltInTargetLength(activeHairstyle, sections[i], out float flatValue);
+
+            // Seed sensible starting values by spreading evenly around the suggested flat default (same
+            // spread amount as the gradient mode, reused here purely as a reasonable starting point) -
+            // the user is expected to hand-tune each level afterward, this just avoids starting from zero.
+            float halfRange = gradientRangeFraction * 0.5f;
+            float bottomValue = flatValue * (1f - halfRange);
+            float topValue = flatValue * (1f + halfRange);
+
+            float[] levelValues = new float[levels];
+            for (int lvl = 0; lvl < levels; lvl++)
+            {
+                float t = levels > 1 ? (float)lvl / (levels - 1) : 0f;
+                levelValues[lvl] = Mathf.Lerp(bottomValue, topValue, t);
+            }
+
+            leveledSectionTargetLengths[i] = new HaircutLeveledSectionTargetLength
+            {
+                Section = sections[i],
+                LevelTargetLengths = levelValues
+            };
+        }
+
+        Debug.Log($"Generated leveled targets for {sections.Length} zones at {levels} levels each. Hand-tune individual values in the Inspector as needed.");
+    }
+
+    private bool TryGetLevelIndex(HairCardData hairCard, int levelCount, out int levelIndex)
+    {
+        levelIndex = 0;
+
+        if (!TryGetRelativeHeightInZone(hairCard, out float t))
+            return false;
+
+        // Even bucketing: t in [0,1) maps to levels 0..levelCount-1, t==1 (topmost card) lands in the
+        // last level rather than overflowing past the array.
+        levelIndex = Mathf.Clamp(Mathf.FloorToInt(t * levelCount), 0, levelCount - 1);
+        return true;
+    }
+
+    private Vector3? _frontReferenceDirLeft, _sideReferenceDirLeft, _frontReferenceDirRight, _sideReferenceDirRight;
+    private Vector3? _cachedHeadCenterWorldForDirectionSplit;
+
+    // Computes 'what does a genuinely front-growing card's GrowthDirection look like' and 'what does a
+    // genuinely side-growing card's GrowthDirection look like', separately for the left and right
+    // hemispheres, by averaging real GrowthDirection data from your unambiguous Fringe/Side zones. Cached
+    // once (cleared only if the character root changes) since this never changes at runtime.
+    private void EnsureDirectionReferencesComputed()
+    {
+        if (_frontReferenceDirLeft.HasValue)
+            return;
+
+        Transform root = hairCardsRoot != null ? hairCardsRoot : transform;
+        HairCardData[] allCards = root.GetComponentsInChildren<HairCardData>(true);
+
+        Vector3 frontLeftSum = Vector3.zero, sideLeftSum = Vector3.zero;
+        Vector3 frontRightSum = Vector3.zero, sideRightSum = Vector3.zero;
+        int frontLeftCount = 0, sideLeftCount = 0, frontRightCount = 0, sideRightCount = 0;
+
+        Vector3 headCenterSum = Vector3.zero;
+        int headCenterCount = 0;
+
+        for (int i = 0; i < allCards.Length; i++)
+        {
+            HairCardData card = allCards[i];
+            if (card == null)
+                continue;
+
+            headCenterSum += card.RootPosition;
+            headCenterCount++;
+
+            Vector3 dir = card.GetGrowthDirection();
+
+            switch (card.Section)
+            {
+                case HairSectionType.FringeLeft:
+                    frontLeftSum += dir; frontLeftCount++;
+                    break;
+                case HairSectionType.LeftSideUpper:
+                case HairSectionType.LeftSideSideburn:
+                    sideLeftSum += dir; sideLeftCount++;
+                    break;
+                case HairSectionType.FringeRight:
+                    frontRightSum += dir; frontRightCount++;
+                    break;
+                case HairSectionType.RightSideUpper:
+                case HairSectionType.RightSideSideburn:
+                    sideRightSum += dir; sideRightCount++;
+                    break;
+            }
+        }
+
+        _cachedHeadCenterWorldForDirectionSplit = headCenterCount > 0 ? headCenterSum / headCenterCount : Vector3.zero;
+
+        _frontReferenceDirLeft = frontLeftCount > 0 ? (frontLeftSum / frontLeftCount).normalized : Vector3.down;
+        _sideReferenceDirLeft = sideLeftCount > 0 ? (sideLeftSum / sideLeftCount).normalized : Vector3.down;
+        _frontReferenceDirRight = frontRightCount > 0 ? (frontRightSum / frontRightCount).normalized : Vector3.down;
+        _sideReferenceDirRight = sideRightCount > 0 ? (sideRightSum / sideRightCount).normalized : Vector3.down;
+    }
+
+    // Classifies a card in a mixed zone as Front-leaning or Side-leaning by comparing its own
+    // GrowthDirection against the left/right reference directions computed above - whichever reference
+    // it's more closely aligned with (higher dot product) wins. Left/right hemisphere is chosen by which
+    // side of the head this card's root actually sits on.
+    private bool TryClassifyFrontOrSide(HairCardData hairCard, out bool isFront)
+    {
+        isFront = true;
+        EnsureDirectionReferencesComputed();
+
+        Vector3 headCenter = _cachedHeadCenterWorldForDirectionSplit ?? hairCard.RootPosition;
+        bool isLeftHemisphere = hairCard.RootPosition.x <= headCenter.x;
+
+        Vector3 frontRef = isLeftHemisphere ? _frontReferenceDirLeft.Value : _frontReferenceDirRight.Value;
+        Vector3 sideRef = isLeftHemisphere ? _sideReferenceDirLeft.Value : _sideReferenceDirRight.Value;
+
+        Vector3 cardDir = hairCard.GetGrowthDirection();
+        float frontDot = Vector3.Dot(cardDir, frontRef);
+        float sideDot = Vector3.Dot(cardDir, sideRef);
+
+        isFront = frontDot >= sideDot;
+        return true;
+    }
+
+    private bool TryGetDirectionSplitLeveledTargetLength(HairCardData hairCard, out float targetLength)
+    {
+        targetLength = 0f;
+
+        if (directionSplitSectionTargetLengths == null)
+            return false;
+
+        HaircutDirectionSplitSectionTargetLength entry = null;
+        for (int i = 0; i < directionSplitSectionTargetLengths.Length; i++)
+        {
+            if (directionSplitSectionTargetLengths[i] != null && directionSplitSectionTargetLengths[i].Section == hairCard.Section)
+            {
+                entry = directionSplitSectionTargetLengths[i];
+                break;
+            }
+        }
+
+        if (entry == null)
+            return false; // this zone isn't in the direction-split list - caller falls back to normal leveled lookup
+
+        TryClassifyFrontOrSide(hairCard, out bool isFront);
+        float[] levels = isFront ? entry.FrontLevelTargetLengths : entry.SideLevelTargetLengths;
+
+        if (levels == null || levels.Length == 0)
+            return false;
+
+        int levelIndex = levels.Length / 2;
+        TryGetLevelIndex(hairCard, levels.Length, out levelIndex);
+        levelIndex = Mathf.Clamp(levelIndex, 0, levels.Length - 1);
+
+        targetLength = levels[levelIndex];
+        return targetLength > 0f;
+    }
+
+    private readonly Dictionary<HairSectionType, Vector2> _zoneDepthRangeCache = new Dictionary<HairSectionType, Vector2>();
+
+    // Same pattern as TryGetRelativeHeightInZone, but ranks cards front-to-back using RootPosition.z
+    // (confirmed empirically: Fringe zones sit at higher Z, Back zones at lower Z for this character).
+    private bool TryGetRelativeDepthInZone(HairCardData hairCard, out float t)
+    {
+        t = 0f;
+
+        if (!_zoneDepthRangeCache.TryGetValue(hairCard.Section, out Vector2 range))
+        {
+            Transform root = hairCardsRoot != null ? hairCardsRoot : transform;
+            HairCardData[] allCards = root.GetComponentsInChildren<HairCardData>(true);
+
+            float min = float.PositiveInfinity;
+            float max = float.NegativeInfinity;
+            int countInZone = 0;
+
+            for (int i = 0; i < allCards.Length; i++)
+            {
+                if (allCards[i] == null || allCards[i].Section != hairCard.Section)
+                    continue;
+
+                float z = allCards[i].RootPosition.z;
+                if (z < min) min = z;
+                if (z > max) max = z;
+                countInZone++;
+            }
+
+            range = countInZone > 1 ? new Vector2(min, max) : new Vector2(0f, 0f);
+            _zoneDepthRangeCache[hairCard.Section] = range;
+        }
+
+        if (Mathf.Approximately(range.x, range.y))
+            return false;
+
+        // Front = higher Z (confirmed: Fringe sits at higher Z than Back), so t=1 means frontmost.
+        t = Mathf.InverseLerp(range.x, range.y, hairCard.RootPosition.z);
+        return true;
+    }
+
+    private bool TryGetTwoAxisTargetLength(HairCardData hairCard, out float targetLength)
+    {
+        targetLength = 0f;
+
+        if (twoAxisSectionTargetLengths == null)
+            return false;
+
+        HaircutTwoAxisSectionTargetLength entry = null;
+        for (int i = 0; i < twoAxisSectionTargetLengths.Length; i++)
+        {
+            if (twoAxisSectionTargetLengths[i] != null && twoAxisSectionTargetLengths[i].Section == hairCard.Section)
+            {
+                entry = twoAxisSectionTargetLengths[i];
+                break;
+            }
+        }
+
+        if (entry == null || entry.HeightRows == null || entry.HeightRows.Length == 0)
+            return false; // this zone isn't in the two-axis list - caller falls back to normal leveled lookup
+
+        int heightIndex = entry.HeightRows.Length / 2;
+        TryGetLevelIndex(hairCard, entry.HeightRows.Length, out heightIndex);
+        heightIndex = Mathf.Clamp(heightIndex, 0, entry.HeightRows.Length - 1);
+
+        HaircutDepthRow row = entry.HeightRows[heightIndex];
+        if (row == null || row.DepthTargetLengths == null || row.DepthTargetLengths.Length == 0)
+            return false;
+
+        int depthIndex = row.DepthTargetLengths.Length / 2;
+        if (TryGetRelativeDepthInZone(hairCard, out float depthT))
+            depthIndex = Mathf.Clamp(Mathf.FloorToInt(depthT * row.DepthTargetLengths.Length), 0, row.DepthTargetLengths.Length - 1);
+
+        targetLength = row.DepthTargetLengths[depthIndex];
+        return targetLength > 0f;
+    }
+
+    private bool TryGetLeveledTargetLength(HairCardData hairCard, out float targetLength)
+    {
+        targetLength = 0f;
+
+        if (leveledSectionTargetLengths == null)
+            return false;
+
+        HaircutLeveledSectionTargetLength entry = null;
+        for (int i = 0; i < leveledSectionTargetLengths.Length; i++)
+        {
+            if (leveledSectionTargetLengths[i] != null && leveledSectionTargetLengths[i].Section == hairCard.Section)
+            {
+                entry = leveledSectionTargetLengths[i];
+                break;
+            }
+        }
+
+        if (entry == null || entry.LevelTargetLengths == null || entry.LevelTargetLengths.Length == 0)
+            return false;
+
+        // If a card can't be height-ranked (e.g. only one card in its zone), fall back to the middle
+        // level as a reasonable default rather than failing outright.
+        int levelIndex = entry.LevelTargetLengths.Length / 2;
+        TryGetLevelIndex(hairCard, entry.LevelTargetLengths.Length, out levelIndex);
+
+        levelIndex = Mathf.Clamp(levelIndex, 0, entry.LevelTargetLengths.Length - 1);
+        targetLength = entry.LevelTargetLengths[levelIndex];
+        return targetLength > 0f;
+    }
+
+    [ContextMenu("Rebuild Missing Hairstyle Templates")]
+    public void RebuildMissingHairstyleTemplates()
+    {
+        EnsureTemplatesExist();
+    }
+
+    [ContextMenu("Reset All Hairstyle Templates To Suggested Section Lengths")]
+    public void ResetAllHairstyleTemplatesToSuggestedSectionLengths()
+    {
+        hairstyleTemplates = CreateDefaultHairstyleTemplates();
+        LoadTemplateIntoCurrentSettings(activeHairstyle);
+        previousActiveHairstyle = activeHairstyle;
+        hasInitializedTemplateMemory = true;
+        ApplyTargetsToHairCards();
+        ApplyActiveHaircutToHairCap();
+    }
+
+    [ContextMenu("Apply Active Haircut To Hair Cap")]
+    public void ApplyActiveHaircutToHairCap()
+    {
+        if (hairCapController == null)
+            return;
+
+        GetHairCapLook(activeHairstyle, out float density, out float darkness, out float opacity);
+        hairCapController.SetBuzzLook(density, darkness, opacity);
+    }
+
+    private void GetHairCapLook(HaircutStyle style, out float density, out float darkness, out float opacity)
+    {
+        switch (style)
+        {
+            case HaircutStyle.Stage1_InductionCut:
+                density = 0.85f;
+                darkness = 1.45f;
+                opacity = 1f;
+                return;
+
+            case HaircutStyle.Stage1_ButchCut:
+                density = 0.62f;
+                darkness = 1.15f;
+                opacity = 0.9f;
+                return;
+
+            case HaircutStyle.Stage1_CrewCut:
+                density = 0.48f;
+                darkness = 1.0f;
+                opacity = 0.75f;
+                return;
+
+            case HaircutStyle.Stage3_DisconnectedUndercut:
+            case HaircutStyle.Stage3_SlickedBackUndercut:
+            case HaircutStyle.Stage3_HardPartUndercut:
+                density = 0.7f;
+                darkness = 1.25f;
+                opacity = 0.9f;
+                return;
+
+            case HaircutStyle.Stage4_LowFade:
+                density = 0.55f;
+                darkness = 1.05f;
+                opacity = 0.75f;
+                return;
+
+            case HaircutStyle.Stage4_MidFade:
+                density = 0.65f;
+                darkness = 1.2f;
+                opacity = 0.85f;
+                return;
+
+            case HaircutStyle.Stage4_HighFade:
+                density = 0.75f;
+                darkness = 1.35f;
+                opacity = 0.95f;
+                return;
+
+            case HaircutStyle.Stage5_SideSweptPixie:
+            case HaircutStyle.Stage5_AvantGardeAngle:
+                density = 0.35f;
+                darkness = 0.9f;
+                opacity = 0.55f;
+                return;
+
+            default:
+                density = 0f;
+                darkness = 0f;
+                opacity = 0f;
+                return;
+        }
+    }
+
+    private void EnsureTemplateMemory()
+    {
+        EnsureTemplatesExist();
+
+        if (customSectionTargetLengths == null || customSectionTargetLengths.Length == 0)
+            customSectionTargetLengths = CreateDefaultSectionTargetLengths(uniformTargetLength);
+
+        if (!hasInitializedTemplateMemory)
+        {
+            SaveCurrentSettingsToTemplate(activeHairstyle);
+            previousActiveHairstyle = activeHairstyle;
+            hasInitializedTemplateMemory = true;
+            return;
+        }
+
+        if (previousActiveHairstyle != activeHairstyle)
+        {
+            SaveCurrentSettingsToTemplate(previousActiveHairstyle);
+            LoadTemplateIntoCurrentSettings(activeHairstyle);
+            previousActiveHairstyle = activeHairstyle;
+            return;
+        }
+
+        SaveCurrentSettingsToTemplate(activeHairstyle);
+    }
+
+    private void EnsureTemplatesExist()
+    {
+        HaircutStyle[] styles = (HaircutStyle[])Enum.GetValues(typeof(HaircutStyle));
+        HaircutStyleTemplate[] rebuiltTemplates = new HaircutStyleTemplate[styles.Length];
+
+        for (int i = 0; i < styles.Length; i++)
+        {
+            HaircutStyleTemplate existingTemplate = FindTemplate(styles[i]);
+            rebuiltTemplates[i] = existingTemplate != null ? existingTemplate : CreateDefaultTemplate(styles[i]);
+        }
+
+        hairstyleTemplates = rebuiltTemplates;
+    }
+
+    private HaircutStyleTemplate FindTemplate(HaircutStyle style)
+    {
+        if (hairstyleTemplates == null)
+            return null;
+
+        for (int i = 0; i < hairstyleTemplates.Length; i++)
+        {
+            if (hairstyleTemplates[i] != null && hairstyleTemplates[i].Style == style)
+                return hairstyleTemplates[i];
+        }
+
+        return null;
+    }
+
+    private void SaveCurrentSettingsToTemplate(HaircutStyle style)
+    {
+        HaircutStyleTemplate template = FindTemplate(style);
+
+        if (template == null)
+            return;
+
+        template.TargetLengthMode = targetLengthMode;
+        template.UniformTargetLength = Mathf.Max(0f, uniformTargetLength);
+        template.CustomSectionTargetLengths = CloneSectionTargets(customSectionTargetLengths);
+        template.LeveledSectionLevelCount = leveledSectionLevelCount;
+        template.LeveledSectionTargetLengths = CloneLeveledSectionTargets(leveledSectionTargetLengths);
+        template.DirectionSplitSectionTargetLengths = CloneDirectionSplitSectionTargets(directionSplitSectionTargetLengths);
+        template.DepthLevelCount = depthLevelCount;
+        template.TwoAxisSectionTargetLengths = CloneTwoAxisSectionTargets(twoAxisSectionTargetLengths);
+    }
+
+    private void LoadTemplateIntoCurrentSettings(HaircutStyle style)
+    {
+        HaircutStyleTemplate template = FindTemplate(style);
+
+        if (template == null)
+            template = CreateDefaultTemplate(style);
+
+        targetLengthMode = template.TargetLengthMode;
+        uniformTargetLength = Mathf.Max(0f, template.UniformTargetLength);
+        customSectionTargetLengths = CloneSectionTargets(template.CustomSectionTargetLengths);
+
+        if (customSectionTargetLengths == null || customSectionTargetLengths.Length == 0)
+            customSectionTargetLengths = CreateDefaultSectionTargetLengths(uniformTargetLength);
+
+        leveledSectionLevelCount = template.LeveledSectionLevelCount > 0 ? template.LeveledSectionLevelCount : 3;
+        leveledSectionTargetLengths = CloneLeveledSectionTargets(template.LeveledSectionTargetLengths);
+        directionSplitSectionTargetLengths = CloneDirectionSplitSectionTargets(template.DirectionSplitSectionTargetLengths);
+        depthLevelCount = template.DepthLevelCount > 0 ? template.DepthLevelCount : 3;
+        twoAxisSectionTargetLengths = CloneTwoAxisSectionTargets(template.TwoAxisSectionTargetLengths);
+    }
+
+    private bool TryGetCustomSectionTargetLength(HairSectionType section, out float targetLength)
+    {
+        if (customSectionTargetLengths != null)
+        {
+            for (int i = 0; i < customSectionTargetLengths.Length; i++)
+            {
+                HaircutSectionTargetLength sectionTarget = customSectionTargetLengths[i];
+
+                if (sectionTarget == null || sectionTarget.Section != section)
+                    continue;
+
+                targetLength = Mathf.Max(0f, sectionTarget.TargetLength);
+                return true;
+            }
+        }
+
+        return TryGetBuiltInTargetLength(activeHairstyle, section, out targetLength);
+    }
+
+    private bool TryGetBuiltInTargetLength(HaircutStyle style, HairSectionType section, out float targetLength)
+    {
+        targetLength = GetSuggestedTargetLength(style, section);
+        return true;
+    }
+
+    private static float GetSuggestedTargetLength(HaircutStyle style, HairSectionType section)
+    {
+        switch (style)
+        {
+            case HaircutStyle.Stage1_InductionCut:
+                return 0.0075f;
+
+            case HaircutStyle.Stage1_ButchCut:
+                return 0.025f;
+
+            case HaircutStyle.Stage1_CrewCut:
+                if (IsTopOrCrownSection(section))
+                    return 0.03f;
+
+                if (section == HairSectionType.BackUpper
+                    || section == HairSectionType.TransitionBackLeftAtUpperSection
+                    || section == HairSectionType.TransitionBackRightAtUpperSection)
+                    return 0.018f;
+
+                return 0.01f;
+
+            case HaircutStyle.Stage2_StandardBob:
+                return GetBobTargetLength(section, 0.13f, 0.135f, 0.14f, 0.15f, 0.145f, 0.10f);
+
+            case HaircutStyle.Stage2_LongBob:
+                return GetBobTargetLength(section, 0.12f, 0.125f, 0.16f, 0.24f, 0.18f, 0.065f);
+
+            case HaircutStyle.Stage2_ALineBob:
+                return GetALineBobTargetLength(section);
+
+            case HaircutStyle.Stage3_DisconnectedUndercut:
+                return GetDisconnectedUndercutTargetLength(section);
+
+            case HaircutStyle.Stage3_SlickedBackUndercut:
+                return GetSlickedBackUndercutTargetLength(section);
+
+            case HaircutStyle.Stage3_HardPartUndercut:
+                return GetHardPartUndercutTargetLength(section);
+
+            case HaircutStyle.Stage4_LowFade:
+                return GetFadeTargetLength(section, 0.006f, 0.02f, 0.035f, 0.055f);
+
+            case HaircutStyle.Stage4_MidFade:
+                return GetFadeTargetLength(section, 0.004f, 0.012f, 0.03f, 0.05f);
+
+            case HaircutStyle.Stage4_HighFade:
+                return GetFadeTargetLength(section, 0.003f, 0.008f, 0.02f, 0.045f);
+
+            case HaircutStyle.Stage5_AsymmetricalBob:
+                return GetAsymmetricalBobTargetLength(section);
+
+            case HaircutStyle.Stage5_SideSweptPixie:
+                return GetSideSweptPixieTargetLength(section);
+
+            case HaircutStyle.Stage5_AvantGardeAngle:
+                return GetAvantGardeAngleTargetLength(section);
+
+            default:
+                return 0.025f;
+        }
+    }
+
+    private static float GetBobTargetLength(HairSectionType section, float nape, float backMiddle, float backUpper, float top, float side, float fringe)
+    {
+        switch (section)
+        {
+            case HairSectionType.BackNape:
+                return nape;
+
+            case HairSectionType.Back:
+            case HairSectionType.BackMiddle:
+            // TransitionAtMiddleSection's natural hair length matches Back/BackMiddle far more closely
+            // than Sideburn/SideUpper - grouping it here instead avoids exceeding its shorter natural length.
+            case HairSectionType.TransitionBackLeftAtMiddleSection:
+            case HairSectionType.TransitionBackRightAtMiddleSection:
+                return backMiddle;
+
+            case HairSectionType.BackUpper:
+            case HairSectionType.TransitionBackLeftAtUpperSection:
+            case HairSectionType.TransitionBackRightAtUpperSection:
+                return backUpper;
+
+            case HairSectionType.LeftSideSideburn:
+            case HairSectionType.LeftSideUpper:
+            case HairSectionType.RightSideSideburn:
+            case HairSectionType.RightSideUpper:
+                return side;
+
+            // Fringe hair drapes down over the face, so it needs its own (shorter) length to actually
+            // frame the face like a real bob, instead of sharing Crown/Top's longer length and covering it.
+            case HairSectionType.FringeLeft:
+            case HairSectionType.FringeMiddle:
+            case HairSectionType.FringeRight:
+                return fringe;
+
+            default:
+                return top;
+        }
+    }
+
+    private static float GetALineBobTargetLength(HairSectionType section)
+    {
+        if (IsFrontSection(section))
+            return 0.34f;
+
+        if (section == HairSectionType.LeftSideUpper
+            || section == HairSectionType.RightSideUpper
+            || section == HairSectionType.LeftSideSideburn
+            || section == HairSectionType.RightSideSideburn)
+            return 0.30f;
+
+        if (IsTopOrCrownSection(section))
+            return 0.28f;
+
+        if (section == HairSectionType.BackNape)
+            return 0.18f;
+
+        return 0.22f;
+    }
+
+    private static float GetDisconnectedUndercutTargetLength(HairSectionType section)
+    {
+        if (IsTopOrCrownSection(section))
+            return 0.13f;
+
+        if (section == HairSectionType.BackNape
+            || section == HairSectionType.LeftSideSideburn
+            || section == HairSectionType.RightSideSideburn)
+            return 0.006f;
+
+        if (section == HairSectionType.BackUpper
+            || section == HairSectionType.TransitionBackLeftAtUpperSection
+            || section == HairSectionType.TransitionBackRightAtUpperSection)
+            return 0.025f;
+
+        return 0.012f;
+    }
+
+    private static float GetSlickedBackUndercutTargetLength(HairSectionType section)
+    {
+        if (IsFrontSection(section) || section == HairSectionType.TopMiddle)
+            return 0.16f;
+
+        if (IsTopOrCrownSection(section))
+            return 0.14f;
+
+        if (section == HairSectionType.BackNape
+            || section == HairSectionType.LeftSideSideburn
+            || section == HairSectionType.RightSideSideburn)
+            return 0.006f;
+
+        return 0.012f;
+    }
+
+    private static float GetHardPartUndercutTargetLength(HairSectionType section)
+    {
+        if (IsRightSideSection(section))
+            return 0.006f;
+
+        if (section == HairSectionType.BackNape)
+            return 0.008f;
+
+        if (IsTopOrCrownSection(section) || section == HairSectionType.LeftSideUpper)
+            return 0.11f;
+
+        return 0.018f;
+    }
+
+    private static float GetFadeTargetLength(HairSectionType section, float shortest, float lowerBlend, float upperBlend, float top)
+    {
+        switch (section)
+        {
+            case HairSectionType.BackNape:
+            case HairSectionType.LeftSideSideburn:
+            case HairSectionType.RightSideSideburn:
+                return shortest;
+
+            case HairSectionType.BackMiddle:
+            case HairSectionType.LeftSideUpper:
+            case HairSectionType.RightSideUpper:
+            case HairSectionType.TransitionBackLeftAtMiddleSection:
+            case HairSectionType.TransitionBackRightAtMiddleSection:
+                return lowerBlend;
+
+            case HairSectionType.BackUpper:
+            case HairSectionType.TransitionBackLeftAtUpperSection:
+            case HairSectionType.TransitionBackRightAtUpperSection:
+                return upperBlend;
+
+            default:
+                return top;
+        }
+    }
+
+    private static float GetAsymmetricalBobTargetLength(HairSectionType section)
+    {
+        if (IsRightSideSection(section))
+            return 0.32f;
+
+        if (IsFrontSection(section))
+            return 0.26f;
+
+        if (section == HairSectionType.BackNape)
+            return 0.18f;
+
+        return 0.22f;
+    }
+
+    private static float GetSideSweptPixieTargetLength(HairSectionType section)
+    {
+        switch (section)
+        {
+            case HairSectionType.FringeRight:
+            case HairSectionType.TopRight:
+                return 0.12f;
+
+            case HairSectionType.FringeMiddle:
+            case HairSectionType.TopMiddle:
+            case HairSectionType.CrownRight:
+                return 0.09f;
+
+            case HairSectionType.FringeLeft:
+            case HairSectionType.TopLeft:
+            case HairSectionType.CrownLeft:
+            case HairSectionType.CrownBack:
+                return 0.06f;
+
+            case HairSectionType.BackNape:
+            case HairSectionType.LeftSideSideburn:
+            case HairSectionType.RightSideSideburn:
+                return 0.018f;
+
+            default:
+                return 0.035f;
+        }
+    }
+
+    private static float GetAvantGardeAngleTargetLength(HairSectionType section)
+    {
+        if (section == HairSectionType.FringeRight || section == HairSectionType.RightSideUpper)
+            return 0.26f;
+
+        if (section == HairSectionType.FringeLeft || section == HairSectionType.LeftSideUpper)
+            return 0.08f;
+
+        if (IsTopOrCrownSection(section))
+            return 0.12f;
+
+        if (section == HairSectionType.BackNape)
+            return 0.015f;
+
+        return IsRightSideSection(section) ? 0.20f : 0.06f;
+    }
+
+    private static bool IsTopOrCrownSection(HairSectionType section)
+    {
+        switch (section)
+        {
+            case HairSectionType.Fringe:
+            case HairSectionType.Crown:
+            case HairSectionType.CrownBack:
+            case HairSectionType.CrownLeft:
+            case HairSectionType.CrownRight:
+            case HairSectionType.FringeLeft:
+            case HairSectionType.FringeMiddle:
+            case HairSectionType.FringeRight:
+            case HairSectionType.TopLeft:
+            case HairSectionType.TopMiddle:
+            case HairSectionType.TopRight:
+                return true;
+
+            default:
+                return false;
+        }
+    }
+
+    private static bool IsFrontSection(HairSectionType section)
+    {
+        return section == HairSectionType.Fringe
+            || section == HairSectionType.FringeLeft
+            || section == HairSectionType.FringeMiddle
+            || section == HairSectionType.FringeRight;
+    }
+
+    private static bool IsRightSideSection(HairSectionType section)
+    {
+        return section == HairSectionType.RightSide
+            || section == HairSectionType.RightSideSideburn
+            || section == HairSectionType.RightSideUpper
+            || section == HairSectionType.CrownRight
+            || section == HairSectionType.FringeRight
+            || section == HairSectionType.TopRight
+            || section == HairSectionType.TransitionBackRightAtMiddleSection
+            || section == HairSectionType.TransitionBackRightAtUpperSection;
+    }
+
+    private bool TryFindSectionInHierarchy(Transform hairCardTransform, Transform stopAtRoot, out HairSectionType section)
+    {
+        section = HairSectionType.Back;
+        int bestNameLength = -1;
+        HairSectionType bestSection = section;
+        Transform current = hairCardTransform;
+
+        while (current != null)
+        {
+            string normalizedName = NormalizeSectionName(current.name);
+            HairSectionType[] sections = (HairSectionType[])Enum.GetValues(typeof(HairSectionType));
+
+            for (int i = 0; i < sections.Length; i++)
+            {
+                string sectionName = sections[i].ToString();
+
+                if (sectionName.Length <= bestNameLength || !normalizedName.StartsWith(sectionName))
+                    continue;
+
+                bestNameLength = sectionName.Length;
+                bestSection = sections[i];
+            }
+
+            if (current == stopAtRoot)
+                break;
+
+            current = current.parent;
+        }
+
+        if (bestNameLength < 0)
+            return false;
+
+        section = bestSection;
+        return true;
+    }
+
+    private string NormalizeSectionName(string objectName)
+    {
+        if (string.IsNullOrEmpty(objectName))
+            return string.Empty;
+
+        System.Text.StringBuilder builder = new System.Text.StringBuilder(objectName.Length);
+
+        for (int i = 0; i < objectName.Length; i++)
+        {
+            char c = objectName[i];
+
+            if (char.IsLetterOrDigit(c))
+                builder.Append(c);
+        }
+
+        return builder.ToString();
+    }
+
+    private static HaircutStyleTemplate CreateDefaultTemplate(HaircutStyle style)
+    {
+        float uniformLength = GetSuggestedUniformTargetLength(style);
+
+        HaircutStyleTemplate template = new HaircutStyleTemplate
+        {
+            Style = style,
+            TargetLengthMode = HaircutTargetLengthMode.CustomPerSection,
+            UniformTargetLength = uniformLength,
+            CustomSectionTargetLengths = CreateSuggestedSectionTargetLengths(style)
+        };
+
+        return template;
+    }
+
+    private static float GetSuggestedUniformTargetLength(HaircutStyle style)
+    {
+        switch (style)
+        {
+            case HaircutStyle.Stage1_InductionCut:
+                return 0.0075f;
+
+            case HaircutStyle.Stage1_ButchCut:
+                return 0.025f;
+
+            case HaircutStyle.Stage1_CrewCut:
+                return 0.02f;
+
+            case HaircutStyle.Stage2_StandardBob:
+                return 0.20f;
+
+            case HaircutStyle.Stage2_LongBob:
+                return 0.30f;
+
+            case HaircutStyle.Stage2_ALineBob:
+                return 0.26f;
+
+            case HaircutStyle.Stage3_DisconnectedUndercut:
+            case HaircutStyle.Stage3_SlickedBackUndercut:
+            case HaircutStyle.Stage3_HardPartUndercut:
+                return 0.06f;
+
+            case HaircutStyle.Stage4_LowFade:
+                return 0.03f;
+
+            case HaircutStyle.Stage4_MidFade:
+                return 0.025f;
+
+            case HaircutStyle.Stage4_HighFade:
+                return 0.018f;
+
+            case HaircutStyle.Stage5_AsymmetricalBob:
+                return 0.24f;
+
+            case HaircutStyle.Stage5_SideSweptPixie:
+                return 0.06f;
+
+            case HaircutStyle.Stage5_AvantGardeAngle:
+                return 0.12f;
+
+            default:
+                return 0.025f;
+        }
+    }
+
+    private static HaircutStyleTemplate[] CreateDefaultHairstyleTemplates()
+    {
+        HaircutStyle[] styles = (HaircutStyle[])Enum.GetValues(typeof(HaircutStyle));
+        HaircutStyleTemplate[] templates = new HaircutStyleTemplate[styles.Length];
+
+        for (int i = 0; i < styles.Length; i++)
+            templates[i] = CreateDefaultTemplate(styles[i]);
+
+        return templates;
+    }
+
+    private static HaircutSectionTargetLength[] CreateDefaultSectionTargetLengths(float targetLength)
+    {
+        HairSectionType[] sections = GetDetailedHairSections();
+        HaircutSectionTargetLength[] targets = new HaircutSectionTargetLength[sections.Length];
+
+        for (int i = 0; i < sections.Length; i++)
+        {
+            targets[i] = new HaircutSectionTargetLength
+            {
+                Section = sections[i],
+                TargetLength = Mathf.Max(0f, targetLength)
+            };
+        }
+
+        return targets;
+    }
+
+    private static HaircutSectionTargetLength[] CreateSuggestedSectionTargetLengths(HaircutStyle style)
+    {
+        HairSectionType[] sections = GetDetailedHairSections();
+        HaircutSectionTargetLength[] targets = new HaircutSectionTargetLength[sections.Length];
+
+        for (int i = 0; i < sections.Length; i++)
+        {
+            targets[i] = new HaircutSectionTargetLength
+            {
+                Section = sections[i],
+                TargetLength = Mathf.Max(0f, GetSuggestedTargetLength(style, sections[i]))
+            };
+        }
+
+        return targets;
+    }
+
+    private static HaircutSectionTargetLength[] CloneSectionTargets(HaircutSectionTargetLength[] source)
+    {
+        if (source == null)
+            return null;
+
+        HaircutSectionTargetLength[] clone = new HaircutSectionTargetLength[source.Length];
+
+        for (int i = 0; i < source.Length; i++)
+        {
+            if (source[i] == null)
+                continue;
+
+            clone[i] = new HaircutSectionTargetLength
+            {
+                Section = source[i].Section,
+                TargetLength = source[i].TargetLength
+            };
+        }
+
+        return clone;
+    }
+
+    private static HaircutLeveledSectionTargetLength[] CloneLeveledSectionTargets(HaircutLeveledSectionTargetLength[] source)
+    {
+        if (source == null)
+            return null;
+
+        HaircutLeveledSectionTargetLength[] clone = new HaircutLeveledSectionTargetLength[source.Length];
+
+        for (int i = 0; i < source.Length; i++)
+        {
+            if (source[i] == null)
+                continue;
+
+            // Deep-clone the inner float[] too - arrays are reference types, so without this every
+            // cloned template would still share (and corrupt) the same underlying level-values array.
+            float[] levelsCopy = null;
+            if (source[i].LevelTargetLengths != null)
+            {
+                levelsCopy = new float[source[i].LevelTargetLengths.Length];
+                System.Array.Copy(source[i].LevelTargetLengths, levelsCopy, levelsCopy.Length);
+            }
+
+            clone[i] = new HaircutLeveledSectionTargetLength
+            {
+                Section = source[i].Section,
+                LevelTargetLengths = levelsCopy
+            };
+        }
+
+        return clone;
+    }
+
+    private static HaircutTwoAxisSectionTargetLength[] CloneTwoAxisSectionTargets(HaircutTwoAxisSectionTargetLength[] source)
+    {
+        if (source == null)
+            return null;
+
+        HaircutTwoAxisSectionTargetLength[] clone = new HaircutTwoAxisSectionTargetLength[source.Length];
+
+        for (int i = 0; i < source.Length; i++)
+        {
+            if (source[i] == null)
+                continue;
+
+            HaircutDepthRow[] rowsCopy = null;
+            if (source[i].HeightRows != null)
+            {
+                rowsCopy = new HaircutDepthRow[source[i].HeightRows.Length];
+                for (int r = 0; r < source[i].HeightRows.Length; r++)
+                {
+                    if (source[i].HeightRows[r] == null)
+                        continue;
+
+                    float[] depthsCopy = null;
+                    if (source[i].HeightRows[r].DepthTargetLengths != null)
+                    {
+                        depthsCopy = new float[source[i].HeightRows[r].DepthTargetLengths.Length];
+                        System.Array.Copy(source[i].HeightRows[r].DepthTargetLengths, depthsCopy, depthsCopy.Length);
+                    }
+
+                    rowsCopy[r] = new HaircutDepthRow { DepthTargetLengths = depthsCopy };
+                }
+            }
+
+            clone[i] = new HaircutTwoAxisSectionTargetLength
+            {
+                Section = source[i].Section,
+                HeightRows = rowsCopy
+            };
+        }
+
+        return clone;
+    }
+
+    private static HaircutDirectionSplitSectionTargetLength[] CloneDirectionSplitSectionTargets(HaircutDirectionSplitSectionTargetLength[] source)
+    {
+        if (source == null)
+            return null;
+
+        HaircutDirectionSplitSectionTargetLength[] clone = new HaircutDirectionSplitSectionTargetLength[source.Length];
+
+        for (int i = 0; i < source.Length; i++)
+        {
+            if (source[i] == null)
+                continue;
+
+            float[] frontCopy = null;
+            if (source[i].FrontLevelTargetLengths != null)
+            {
+                frontCopy = new float[source[i].FrontLevelTargetLengths.Length];
+                System.Array.Copy(source[i].FrontLevelTargetLengths, frontCopy, frontCopy.Length);
+            }
+
+            float[] sideCopy = null;
+            if (source[i].SideLevelTargetLengths != null)
+            {
+                sideCopy = new float[source[i].SideLevelTargetLengths.Length];
+                System.Array.Copy(source[i].SideLevelTargetLengths, sideCopy, sideCopy.Length);
+            }
+
+            clone[i] = new HaircutDirectionSplitSectionTargetLength
+            {
+                Section = source[i].Section,
+                FrontLevelTargetLengths = frontCopy,
+                SideLevelTargetLengths = sideCopy
+            };
+        }
+
+        return clone;
+    }
+
+    private static HairSectionType[] GetDetailedHairSections()
+    {
+        return new[]
+        {
+            HairSectionType.Back,
+            HairSectionType.BackMiddle,
+            HairSectionType.BackNape,
+            HairSectionType.BackUpper,
+            HairSectionType.CrownBack,
+            HairSectionType.CrownLeft,
+            HairSectionType.CrownRight,
+            HairSectionType.FringeLeft,
+            HairSectionType.FringeMiddle,
+            HairSectionType.FringeRight,
+            HairSectionType.LeftSideSideburn,
+            HairSectionType.LeftSideUpper,
+            HairSectionType.RightSideSideburn,
+            HairSectionType.RightSideUpper,
+            HairSectionType.TopLeft,
+            HairSectionType.TopMiddle,
+            HairSectionType.TopRight,
+            HairSectionType.TransitionBackLeftAtMiddleSection,
+            HairSectionType.TransitionBackLeftAtUpperSection,
+            HairSectionType.TransitionBackRightAtMiddleSection,
+            HairSectionType.TransitionBackRightAtUpperSection
+        };
+    }
+}

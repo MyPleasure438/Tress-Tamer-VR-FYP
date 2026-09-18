@@ -1,0 +1,136 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!1 &3953666153791857870
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 4425101071083289219}
+  - component: {fileID: 6554112043961623657}
+  - component: {fileID: 3711660506942015937}
+  - component: {fileID: 2754088621444515776}
+  m_Layer: 0
+  m_Name: Managers
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!4 &4425101071083289219
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3953666153791857870}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: -2.82944, y: 0, z: 1.05779}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
+--- !u!114 &6554112043961623657
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3953666153791857870}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: e764eb6294795ff4cb83aeac26cc90cd, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::CuttingManager
+  cutRadius: 0.02
+  hairMeshFilter: {fileID: 0}
+  hairParticleSystem: {fileID: 0}
+  cuttableHairLayers:
+    serializedVersion: 2
+    m_Bits: 4294967295
+  hairTriggerInteraction: 2
+  requireHairCardData: 1
+  preferSegmentedHairCards: 1
+  respectActiveHaircutTargets: 1
+  stage1HaircutManager: {fileID: 0}
+  hairUndoManager: {fileID: 0}
+  addBoxColliderToFallenHair: 1
+  hairCardsRoot: {fileID: 0}
+  minimumDistanceFromRoot: 0.01
+  fallenHairMass: 0.01
+  fallenHairDownForce: 0.01
+  fallenHairRandomScatter: 0
+  fallenHairTorque: 0.001
+  fallenHairLinearDamping: 1.5
+  fallenHairAngularDamping: 2.5
+  fallenHairLifetime: 4
+  fallenHairParent: {fileID: 0}
+  spawnFallenHair: 1
+  fallenHairPoolPrefab: {fileID: 0}
+  useFallenHairPooling: 1
+  initialFallenHairPoolSize: 20
+  maxFallenHairPoolSize: 80
+  fadeFallenHairBeforePooling: 1
+  fallenHairFadeDuration: 1
+  maxHairCardsCutPerSnip: 20
+  spreadCutsOverMultipleFrames: 0
+  maxCutsProcessedPerFrame: 1
+  logFallenHairSpawn: 1
+  overlapBufferSize: 128
+  cutPreviewMaterial: {fileID: 2100000, guid: ff81c0b65bd997f4592644b4e424ab6f, type: 2}
+  useRendererBoundsFallbackForCutBoxes: 0
+  maxCutPreviewsPerUpdate: 3
+  maxRendererFallbackChecksPerBox: 80
+  brushRootLockDistance: 0.015
+  lockHairRootsWhileBrushing: 1
+  maxHairCardsCombedPerFrame: 12
+  combRootLockDistance: 0.015
+  lockHairRootsWhileCombing: 1
+  combWholeHairCardFromRoot: 1
+  combTipInfluence: 1
+  useVisualCombForSegmentedHairCards: 1
+  visualCombMaxDegreesPerFrame: 3
+  visualCombPreserveRootPosition: 1
+  applyGravityAfterVisualComb: 1
+  visualCombGravityDelay: 0.15
+  visualCombGravityDegreesPerSecond: 8
+  visualCombSettleTowardOriginalDirection: 1
+  visualCombGravityDirection: {x: 0, y: -1, z: 0}
+--- !u!114 &3711660506942015937
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3953666153791857870}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: c5b3d6facce04494a8acf3e6d46c9e3b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::GameManager
+  currentState: 0
+  playerName: 
+  totalTools:
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+  - {fileID: 0}
+--- !u!114 &2754088621444515776
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 3953666153791857870}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1abdc44f2bf9fd94e99b8e1266bfcd0f, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: Assembly-CSharp::HairManager
+  HairCards:
+  - {fileID: 0}

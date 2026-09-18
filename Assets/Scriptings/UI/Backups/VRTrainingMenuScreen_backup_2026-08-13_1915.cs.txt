@@ -1,0 +1,797 @@
+using System;
+using TMPro;
+using UnityEngine;
+using UnityEngine.EventSystems;
+using UnityEngine.Events;
+using UnityEngine.UI;
+
+[Serializable]
+public class HaircutStyleUnityEvent : UnityEvent<HaircutStyle> { }
+
+[Serializable]
+public class TrainingModeUnityEvent : UnityEvent<Stage1TrainingMode> { }
+
+[Serializable]
+public class BoolUnityEvent : UnityEvent<bool> { }
+
+[Serializable]
+public class FloatUnityEvent : UnityEvent<float> { }
+
+// HANDOFF NOTE:
+// Runtime-generated world-space VR menu for the start screen, module selection, settings, and records.
+// It builds UI by script so layout can be tuned from Inspector offsets without maintaining a prefab tree.
+public class VRTrainingMenuScreen : MonoBehaviour
+{
+    private enum MenuPage
+    {
+        Main,
+        ModuleSelect,
+        Stage1Select,
+        Stage2Select,
+        Settings,
+        Records
+    }
+
+    [Header("Scene Links")]
+    [SerializeField] private HaircutManager haircutManager;
+    [Tooltip("Optional. Needed for the 'All Haircuts' chain mode.")]
+    [SerializeField] private HaircutChainManager chainManager;
+    [SerializeField] private EvaluationSystem evaluationSystem;
+    [SerializeField] private Stage1ResultPanel resultPanel;
+    [SerializeField] private Transform playerCamera;
+    [SerializeField] private Transform screenAnchor;
+    // Optional gameplay root to hide until the player presses Begin Training.
+    [SerializeField] private GameObject gameplayRootToEnable;
+    [SerializeField] private GameObject[] gameplayObjectsToEnable;
+
+    [Header("Screen Setup")]
+    [SerializeField] private bool buildOnStart = true;
+    [SerializeField] private bool showMenuOnStart = true;
+    [SerializeField] private bool hideGameplayUntilTrainingStarts = false;
+    [SerializeField] private bool hideScreenWhenTrainingStarts = true;
+    [SerializeField] private bool placeInFrontOfPlayerOnStart = false;
+    [SerializeField] private float screenDistanceFromPlayer = 1.8f;
+    [SerializeField] private float screenHeightOffset = -0.05f;
+    [SerializeField] private float worldScale = 0.0015f;
+    [SerializeField] private Vector2 screenSize = new Vector2(1400f, 900f);
+
+    [Header("Backdrop Layout")]
+    [SerializeField] private Vector2 backdropSize = new Vector2(1400f, 900f);
+    [SerializeField] private Vector2 backdropOffset = Vector2.zero;
+    // Usually off now. The dark rectangles are the main readable panels.
+    [SerializeField] private bool showSoftCenterSurface = false;
+    [SerializeField] private Vector2 softCenterSurfaceSize = new Vector2(1320f, 650f);
+    [SerializeField] private Vector2 softCenterSurfaceOffset = new Vector2(0f, -90f);
+
+    [Header("Dark Rectangle Offsets")]
+    // Quick Inspector tuning for moving all page panels after generation.
+    [SerializeField] private Vector2 allDarkRectanglesOffset = Vector2.zero;
+    [SerializeField] private Vector2 mainMenuDarkRectangleOffset = Vector2.zero;
+    [SerializeField] private Vector2 moduleSelectDarkRectangleOffset = Vector2.zero;
+    [SerializeField] private Vector2 stage1DarkRectangleOffset = Vector2.zero;
+    [SerializeField] private Vector2 settingsDarkRectangleOffset = Vector2.zero;
+    [SerializeField] private Vector2 recordsDarkRectangleOffset = Vector2.zero;
+
+    [Header("Default Training")]
+    [SerializeField] private HaircutStyle selectedHaircut = HaircutStyle.Stage1_InductionCut;
+    private bool selectedAllHaircuts = false;
+    [SerializeField] private Stage1TrainingMode selectedTrainingMode = Stage1TrainingMode.Practice;
+
+    [Header("Settings State")]
+    [SerializeField] private bool leftHanded = true;
+    [SerializeField] private bool vibrationEnabled = true;
+    [Tooltip("Synced to/from this Transform's Y position (converted between meters and centimeters). Drag your XR Origin (VR) GameObject here.")]
+    [SerializeField] private Transform xrOrigin;
+    [SerializeField] private float floorHeightCm = 130f;
+    [Tooltip("How much each +/- press changes floor height by, in centimeters. 10 = 0.1 meters.")]
+    [SerializeField] private float floorHeightStepCm = 10f;
+
+
+    [Header("Events")]
+    [SerializeField] private UnityEvent onStartTraining;
+    // Public accessor so other editor tooling can wire persistent listeners without needing reflection.
+    public UnityEvent OnStartTrainingEvent => onStartTraining;
+    [SerializeField] private UnityEvent onRecenterView;
+    [SerializeField] private UnityEvent onExitRequested;
+    [SerializeField] private HaircutStyleUnityEvent onHaircutSelected;
+    [SerializeField] private TrainingModeUnityEvent onTrainingModeChanged;
+    [SerializeField] private BoolUnityEvent onLeftHandedChanged;
+    [SerializeField] private BoolUnityEvent onVibrationChanged;
+    [SerializeField] private FloatUnityEvent onFloorHeightChanged;
+
+    private GameObject screenRoot;
+    private Canvas canvas;
+    private RectTransform screenRect;
+    private RectTransform contentRoot;
+    private MenuPage currentPage;
+
+    private readonly Color clearBlack = new Color(0f, 0f, 0f, 0.62f);
+    private readonly Color panelBlack = new Color(0.03f, 0.035f, 0.032f, 0.76f);
+    private readonly Color buttonDark = new Color(0.08f, 0.085f, 0.08f, 0.88f);
+    private readonly Color buttonGreen = new Color(0.04f, 0.29f, 0.18f, 0.95f);
+    private readonly Color buttonBorder = new Color(0.7f, 0.74f, 0.72f, 0.5f);
+    private readonly Color disabledDark = new Color(0.035f, 0.035f, 0.035f, 0.62f);
+    private readonly Color textWhite = new Color(0.96f, 0.96f, 0.94f, 1f);
+    private readonly Color textMuted = new Color(0.65f, 0.66f, 0.63f, 1f);
+
+    private void Start()
+    {
+        // Sync the displayed/stored floor height to the XR Origin's ACTUAL current Y position on
+        // start, so the value shown always reflects reality rather than a stale default.
+        if (xrOrigin != null)
+            floorHeightCm = xrOrigin.position.y * 100f; // meters -> cm
+        if (hideGameplayUntilTrainingStarts)
+            SetGameplayActive(false);
+
+        if (buildOnStart)
+            BuildScreen();
+
+        if (showMenuOnStart)
+            ShowMainMenu();
+        else
+            SetScreenVisible(false);
+    }
+
+    [ContextMenu("Rebuild VR Training Menu")]
+    public void RebuildScreen()
+    {
+        if (screenRoot != null)
+        {
+            if (Application.isPlaying)
+                Destroy(screenRoot);
+            else
+                DestroyImmediate(screenRoot);
+        }
+
+        screenRoot = null;
+        canvas = null;
+        screenRect = null;
+        contentRoot = null;
+
+        BuildScreen();
+        ShowMainMenu();
+    }
+
+    [ContextMenu("Refresh Current Menu Page")]
+    public void RefreshCurrentMenuPage()
+    {
+        if (screenRoot == null)
+            return;
+
+        switch (currentPage)
+        {
+            case MenuPage.ModuleSelect:
+                ShowModuleSelect();
+                return;
+
+            case MenuPage.Stage1Select:
+                ShowStage1Select();
+                return;
+
+            case MenuPage.Settings:
+                ShowSettings();
+                return;
+
+            case MenuPage.Records:
+                ShowRecords();
+                return;
+
+            default:
+                ShowMainMenu();
+                return;
+        }
+    }
+
+    public void SetAllDarkRectanglesOffset(Vector2 offset)
+    {
+        allDarkRectanglesOffset = offset;
+        RefreshCurrentMenuPage();
+    }
+
+    public void BuildScreen()
+    {
+        if (screenRoot != null)
+            return;
+
+        // Required so VR ray/UI clicks work even if the scene did not already contain an EventSystem.
+        EnsureEventSystem();
+
+        screenRoot = new GameObject("VR Training Menu Screen");
+        screenRoot.transform.SetParent(transform, false);
+        screenRoot.transform.localScale = Vector3.one * Mathf.Max(0.0001f, worldScale);
+
+        canvas = screenRoot.AddComponent<Canvas>();
+        canvas.renderMode = RenderMode.WorldSpace;
+        canvas.worldCamera = ResolveCamera();
+
+        screenRoot.AddComponent<CanvasScaler>().dynamicPixelsPerUnit = 10f;
+        screenRoot.AddComponent<GraphicRaycaster>();
+        AddOptionalComponent(screenRoot, "UnityEngine.XR.Interaction.Toolkit.UI.TrackedDeviceGraphicRaycaster, Unity.XR.Interaction.Toolkit");
+
+        screenRect = canvas.GetComponent<RectTransform>();
+        screenRect.sizeDelta = screenSize;
+
+        contentRoot = screenRect;
+        PositionScreen();
+    }
+
+    public void ShowMainMenu()
+    {
+        EnsureBuilt();
+        currentPage = MenuPage.Main;
+        SetScreenVisible(true);
+        ClearContent();
+        AddBackdrop();
+        CreateHeader("Tress Tamer", "VR Training Simulator", false);
+
+        RectTransform panel = CreatePanel("Main Buttons", new Vector2(650f, 560f), GetDarkRectanglePosition(new Vector2(0f, -120f), mainMenuDarkRectangleOffset), panelBlack);
+        CreateButton("Start Training", panel, new Vector2(560f, 105f), new Vector2(0f, 170f), buttonGreen, true, ShowModuleSelect, 42);
+        CreateButton("Calibration and Settings", panel, new Vector2(560f, 105f), new Vector2(0f, 40f), buttonDark, true, ShowSettings, 36);
+        CreateButton("Performance Records", panel, new Vector2(560f, 105f), new Vector2(0f, -90f), buttonDark, true, ShowRecords, 36);
+        CreateButton("Exit", panel, new Vector2(560f, 105f), new Vector2(0f, -220f), buttonDark, true, ExitApplication, 34);
+    }
+
+    public void ShowModuleSelect()
+    {
+        EnsureBuilt();
+        currentPage = MenuPage.ModuleSelect;
+        SetScreenVisible(true);
+        ClearContent();
+        AddBackdrop();
+        CreateHeader("Select Training Module", string.Empty, true);
+
+        RectTransform panel = CreatePanel("Module Cards", new Vector2(1320f, 470f), GetDarkRectanglePosition(new Vector2(0f, -130f), moduleSelectDarkRectangleOffset), panelBlack);
+        CreateStageCard(panel, "Stage 01", "Buzz\nCut", new Vector2(-520f, 15f), true, ShowStage1Select);
+        CreateStageCard(panel, "Stage 02", "Blunt\nBob", new Vector2(-260f, 15f), true, ShowStage2Select);
+        CreateStageCard(panel, "Stage 03", "Under\nCut", new Vector2(0f, 15f), false, null);
+        CreateStageCard(panel, "Stage 04", "Tapered\nFade", new Vector2(260f, 15f), false, null);
+        CreateStageCard(panel, "Stage 05", "Creative\nCut", new Vector2(520f, 15f), false, null);
+    }
+
+    public void ShowStage1Select()
+    {
+        EnsureBuilt();
+        currentPage = MenuPage.Stage1Select;
+        SetScreenVisible(true);
+        ClearContent();
+        AddBackdrop();
+        CreateHeader("Stage 01: Buzz Cut", "Choose haircut and training mode", true);
+
+        RectTransform panel = CreatePanel("Stage 1 Options", new Vector2(1060f, 520f), GetDarkRectanglePosition(new Vector2(0f, -145f), stage1DarkRectangleOffset), panelBlack);
+        CreateHaircutButton(panel, "Induction\n0.5-1.0 cm", HaircutStyle.Stage1_InductionCut, new Vector2(-310f, 135f));
+        CreateHaircutButton(panel, "Butch\n2.0-3.0 cm", HaircutStyle.Stage1_ButchCut, new Vector2(0f, 135f));
+        CreateHaircutButton(panel, "Crew\nSides 1 cm\nTop 3 cm", HaircutStyle.Stage1_CrewCut, new Vector2(310f, 135f));
+        CreateButton("All Haircuts (Induction -> Butch -> Crew)", panel, new Vector2(950f, 55f), new Vector2(0f, 45f), selectedAllHaircuts ? buttonGreen : buttonDark, true, SelectAllHaircuts, 26);
+
+        CreateLabel("Training Mode", panel, new Vector2(0f, -10f), 34, textWhite, TextAlignmentOptions.Center, new Vector2(420f, 70f));
+        CreateModeButton(panel, "Practice", Stage1TrainingMode.Practice, new Vector2(-150f, -95f));
+        CreateModeButton(panel, "Assessment", Stage1TrainingMode.Assessment, new Vector2(150f, -95f));
+        CreateButton("Begin Training", panel, new Vector2(450f, 82f), new Vector2(0f, -185f), buttonGreen, true, BeginTraining, 34);
+    }
+
+    public void ShowStage2Select()
+    {
+        EnsureBuilt();
+        currentPage = MenuPage.Stage2Select;
+        SetScreenVisible(true);
+        ClearContent();
+        AddBackdrop();
+        CreateHeader("Stage 02: Blunt Bob", "Choose haircut and training mode", true);
+
+        RectTransform panel = CreatePanel("Stage 2 Options", new Vector2(1060f, 520f), GetDarkRectanglePosition(new Vector2(0f, -145f), stage1DarkRectangleOffset), panelBlack);
+        CreateHaircutButton(panel, "Standard Bob\n20-24 cm", HaircutStyle.Stage2_StandardBob, new Vector2(-310f, 135f));
+        CreateHaircutButton(panel, "Long Bob\n30-34 cm", HaircutStyle.Stage2_LongBob, new Vector2(0f, 135f));
+        CreateHaircutButton(panel, "A-Line Bob\nAngled front", HaircutStyle.Stage2_ALineBob, new Vector2(310f, 135f));
+        CreateButton("All Haircuts (Standard -> Long -> A-Line)", panel, new Vector2(950f, 55f), new Vector2(0f, 45f), selectedAllHaircuts ? buttonGreen : buttonDark, true, SelectAllHaircuts, 26);
+
+        CreateLabel("Training Mode", panel, new Vector2(0f, -10f), 34, textWhite, TextAlignmentOptions.Center, new Vector2(420f, 70f));
+        CreateModeButton(panel, "Practice", Stage1TrainingMode.Practice, new Vector2(-150f, -95f));
+        CreateModeButton(panel, "Assessment", Stage1TrainingMode.Assessment, new Vector2(150f, -95f));
+        CreateButton("Begin Training", panel, new Vector2(450f, 82f), new Vector2(0f, -185f), buttonGreen, true, BeginTraining, 34);
+    }
+
+    public void ShowSettings()
+    {
+        EnsureBuilt();
+        currentPage = MenuPage.Settings;
+        SetScreenVisible(true);
+        ClearContent();
+        AddBackdrop();
+        CreateHeader("Calibration and Settings", string.Empty, true);
+
+        RectTransform panel = CreatePanel("Settings", new Vector2(1180f, 520f), GetDarkRectanglePosition(new Vector2(0f, -145f), settingsDarkRectangleOffset), panelBlack);
+
+        CreateButton("Recenter\nView", panel, new Vector2(235f, 100f), new Vector2(-315f, 145f), buttonDark, true, RecenterView, 30);
+        CreateLabel("Resets your orientation to face forward", panel, new Vector2(-315f, 65f), 22, textWhite, TextAlignmentOptions.Center, new Vector2(450f, 70f));
+
+        CreateButton("Floor\nHeight", panel, new Vector2(220f, 100f), new Vector2(-365f, -95f), buttonDark, true, null, 29);
+        CreateLabel($"{Mathf.RoundToInt(floorHeightCm)}", panel, new Vector2(-195f, -95f), 44, textWhite, TextAlignmentOptions.Center, new Vector2(120f, 84f));
+        CreateButton("+", panel, new Vector2(56f, 56f), new Vector2(-100f, -62f), buttonGreen, true, IncreaseFloorHeight, 36);
+        CreateButton("-", panel, new Vector2(56f, 56f), new Vector2(-100f, -130f), new Color(0.55f, 0.02f, 0.02f, 0.95f), true, DecreaseFloorHeight, 36);
+        TMP_Text floorHint = CreateLabel("Match the virtual floor to your physical ground", panel, new Vector2(-300f, -200f), 21, textWhite, TextAlignmentOptions.Center, new Vector2(570f, 46f));
+        floorHint.enableWordWrapping = false;
+
+        CreateHandedButton(panel, "Left\nHanded", true, new Vector2(225f, 145f));
+        CreateHandedButton(panel, "Right\nHanded", false, new Vector2(425f, 145f));
+        CreateLabel("Swap tools according to dominant hand", panel, new Vector2(325f, 65f), 22, textWhite, TextAlignmentOptions.Center, new Vector2(460f, 70f));
+
+        CreateButton("Vibration\nFeedback", panel, new Vector2(235f, 100f), new Vector2(230f, -95f), buttonDark, true, null, 29);
+        CreateButton("On", panel, new Vector2(120f, 64f), new Vector2(415f, -65f), vibrationEnabled ? buttonGreen : buttonDark, true, () => SetVibration(true), 29);
+        CreateButton("Off", panel, new Vector2(120f, 64f), new Vector2(415f, -145f), vibrationEnabled ? buttonDark : buttonGreen, true, () => SetVibration(false), 29);
+        CreateLabel("Toggle controller vibrations when cutting", panel, new Vector2(325f, -200f), 21, textWhite, TextAlignmentOptions.Center, new Vector2(500f, 46f));
+    }
+
+    public void ShowRecords()
+    {
+        EnsureBuilt();
+        currentPage = MenuPage.Records;
+        SetScreenVisible(true);
+        ClearContent();
+        AddBackdrop();
+        CreateHeader("Performance Records", string.Empty, true);
+
+        RectTransform panel = CreatePanel("Records", new Vector2(900f, 420f), GetDarkRectanglePosition(new Vector2(0f, -145f), recordsDarkRectangleOffset), panelBlack);
+        string scoreText = evaluationSystem != null
+            ? $"Latest Score\n{evaluationSystem.finalScore:F1}%"
+            : "Latest Score\nNo evaluation yet";
+
+        CreateLabel(scoreText, panel, new Vector2(0f, 90f), 42, textWhite, TextAlignmentOptions.Center, new Vector2(650f, 150f));
+        CreateButton("Evaluate Current Haircut", panel, new Vector2(430f, 76f), new Vector2(0f, -45f), buttonGreen, evaluationSystem != null, EvaluateAndRefreshRecords, 28);
+        CreateButton("Back to Main Menu", panel, new Vector2(430f, 70f), new Vector2(0f, -140f), buttonDark, true, ShowMainMenu, 27);
+    }
+
+    public void BeginTraining()
+    {
+        if (haircutManager != null)
+            haircutManager.SetTrainingMode(selectedTrainingMode);
+
+        if (selectedAllHaircuts && chainManager != null)
+        {
+            // Chain mode: figure out which stage index we're on from currentPage, start the chain instead
+            // of a single hairstyle. Stage index matches HaircutChainManager's stages array (0 = Stage 1).
+            int stageIndex = currentPage == MenuPage.Stage2Select ? 1 : 0;
+            chainManager.StartChain(stageIndex);
+
+            if (resultPanel != null)
+                resultPanel.HideResults();
+
+            SetGameplayActive(true);
+            onTrainingModeChanged?.Invoke(selectedTrainingMode);
+            onStartTraining?.Invoke();
+
+            if (hideScreenWhenTrainingStarts)
+                SetScreenVisible(false);
+
+            return;
+        }
+
+        // Original single-haircut flow, unchanged.
+        if (haircutManager != null)
+            haircutManager.SetActiveHairstyle(selectedHaircut);
+
+        if (resultPanel != null)
+            resultPanel.HideResults();
+
+        SetGameplayActive(true);
+        onHaircutSelected?.Invoke(selectedHaircut);
+        onTrainingModeChanged?.Invoke(selectedTrainingMode);
+        onStartTraining?.Invoke();
+
+        if (hideScreenWhenTrainingStarts)
+            SetScreenVisible(false);
+    }
+
+    public void ShowMenuAgain()
+    {
+        ShowMainMenu();
+    }
+
+    public void RecenterView()
+    {
+        RecenterScreenToPlayer();
+        onRecenterView?.Invoke();
+    }
+
+    public void IncreaseFloorHeight()
+    {
+        SetFloorHeight(floorHeightCm + Mathf.Max(0.1f, floorHeightStepCm));
+    }
+
+    public void DecreaseFloorHeight()
+    {
+        SetFloorHeight(floorHeightCm - Mathf.Max(0.1f, floorHeightStepCm));
+    }
+
+    public void SetFloorHeight(float value)
+    {
+        floorHeightCm = Mathf.Max(0f, value);
+
+        if (xrOrigin != null)
+        {
+            Vector3 pos = xrOrigin.position;
+            pos.y = floorHeightCm / 100f; // cm -> meters
+            xrOrigin.position = pos;
+        }
+
+        onFloorHeightChanged?.Invoke(floorHeightCm);
+
+        if (currentPage == MenuPage.Settings)
+            ShowSettings();
+    }
+
+    public void SetLeftHanded(bool value)
+    {
+        leftHanded = value;
+        onLeftHandedChanged?.Invoke(leftHanded);
+
+        if (currentPage == MenuPage.Settings)
+            ShowSettings();
+    }
+
+    public void SetVibration(bool value)
+    {
+        vibrationEnabled = value;
+        onVibrationChanged?.Invoke(vibrationEnabled);
+
+        if (currentPage == MenuPage.Settings)
+            ShowSettings();
+    }
+
+    public void ExitApplication()
+    {
+        onExitRequested?.Invoke();
+
+#if UNITY_EDITOR
+        Debug.Log("[VRTrainingMenuScreen] Exit requested. Application.Quit only works in a built game.");
+#else
+        Application.Quit();
+#endif
+    }
+
+    private void EvaluateAndRefreshRecords()
+    {
+        if (evaluationSystem != null)
+            evaluationSystem.EvaluateActiveHaircut();
+
+        ShowRecords();
+    }
+
+    private void SelectHaircut(HaircutStyle haircutStyle)
+    {
+        selectedHaircut = haircutStyle;
+        selectedAllHaircuts = false;
+        onHaircutSelected?.Invoke(selectedHaircut);
+        ShowStage1Select();
+    }
+
+    private void SelectAllHaircuts()
+    {
+        selectedAllHaircuts = true;
+        RefreshCurrentMenuPage();
+    }
+
+    private void PlayClickSound()
+    {
+        if (UIAudioManager.Instance != null)
+            UIAudioManager.Instance.PlayClickSound(transform.position);
+    }
+
+    private void SelectTrainingMode(Stage1TrainingMode mode)
+    {
+        selectedTrainingMode = mode;
+        onTrainingModeChanged?.Invoke(selectedTrainingMode);
+        ShowStage1Select();
+    }
+
+    private void CreateHeader(string title, string subtitle, bool includeBackButton)
+    {
+        if (includeBackButton)
+            CreateButton("<", screenRect, new Vector2(90f, 90f), new Vector2(-620f, 335f), new Color(0f, 0f, 0f, 0f), true, GoBack, 62);
+
+        CreateLabel(title, screenRect, new Vector2(0f, 315f), 66, textWhite, TextAlignmentOptions.Center, new Vector2(980f, 100f));
+
+        if (!string.IsNullOrEmpty(subtitle))
+            CreateLabel(subtitle, screenRect, new Vector2(0f, 240f), 38, textMuted, TextAlignmentOptions.Center, new Vector2(760f, 70f));
+    }
+
+    private void GoBack()
+    {
+        switch (currentPage)
+        {
+            case MenuPage.ModuleSelect:
+            case MenuPage.Settings:
+            case MenuPage.Records:
+                ShowMainMenu();
+                return;
+
+            case MenuPage.Stage1Select:
+                ShowModuleSelect();
+                return;
+
+            default:
+                ShowMainMenu();
+                return;
+        }
+    }
+
+    private void CreateStageCard(RectTransform parent, string stageLabel, string stageName, Vector2 position, bool unlocked, UnityAction onClick)
+    {
+        Button button = CreateButton(string.Empty, parent, new Vector2(210f, 250f), position, unlocked ? buttonDark : disabledDark, unlocked, onClick, 28);
+        RectTransform card = button.GetComponent<RectTransform>();
+
+        CreateLabel(stageLabel, card, new Vector2(0f, 70f), 34, unlocked ? textWhite : textMuted, TextAlignmentOptions.Center, new Vector2(190f, 60f));
+        CreateLabel(stageName, card, new Vector2(0f, -15f), 32, unlocked ? textWhite : textMuted, TextAlignmentOptions.Center, new Vector2(190f, 120f));
+
+        if (!unlocked)
+            CreateLabel("LOCKED", card, new Vector2(0f, -100f), 22, textMuted, TextAlignmentOptions.Center, new Vector2(180f, 40f));
+    }
+
+    private void CreateHaircutButton(RectTransform parent, string label, HaircutStyle style, Vector2 position)
+    {
+        bool selected = !selectedAllHaircuts && selectedHaircut == style;
+        CreateButton(label, parent, new Vector2(285f, 150f), position, selected ? buttonGreen : buttonDark, true, () => SelectHaircut(style), 31);
+    }
+
+    private void CreateModeButton(RectTransform parent, string label, Stage1TrainingMode mode, Vector2 position)
+    {
+        bool selected = selectedTrainingMode == mode;
+        CreateButton(label, parent, new Vector2(250f, 80f), position, selected ? buttonGreen : buttonDark, true, () => SelectTrainingMode(mode), 31);
+    }
+
+    private void CreateHandedButton(RectTransform parent, string label, bool value, Vector2 position)
+    {
+        bool selected = leftHanded == value;
+        CreateButton(label, parent, new Vector2(190f, 110f), position, selected ? buttonGreen : buttonDark, true, () => SetLeftHanded(value), 31);
+    }
+
+    private Vector2 GetDarkRectanglePosition(Vector2 defaultPosition, Vector2 pageOffset)
+    {
+        return defaultPosition + allDarkRectanglesOffset + pageOffset;
+    }
+
+    private Button CreateButton(string label, RectTransform parent, Vector2 size, Vector2 position, Color color, bool interactable, UnityAction action, int fontSize)
+    {
+        GameObject buttonObject = new GameObject(string.IsNullOrEmpty(label) ? "Button" : label.Replace("\n", " "));
+        buttonObject.transform.SetParent(parent, false);
+
+        RectTransform rectTransform = buttonObject.AddComponent<RectTransform>();
+        rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+        rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+        rectTransform.pivot = new Vector2(0.5f, 0.5f);
+        rectTransform.sizeDelta = size;
+        rectTransform.anchoredPosition = position;
+
+        Image image = buttonObject.AddComponent<Image>();
+        image.color = color;
+
+        Button button = buttonObject.AddComponent<Button>();
+        button.interactable = interactable;
+
+        ColorBlock colors = button.colors;
+        colors.normalColor = Color.white;
+        colors.highlightedColor = new Color(1.12f, 1.12f, 1.12f, 1f);
+        colors.pressedColor = new Color(0.78f, 0.78f, 0.78f, 1f);
+        colors.disabledColor = new Color(0.55f, 0.55f, 0.55f, 0.65f);
+        button.colors = colors;
+
+        if (action != null)
+            button.onClick.AddListener(action);
+            button.onClick.AddListener(PlayClickSound);
+
+        if (!string.IsNullOrEmpty(label))
+            CreateLabel(label, rectTransform, Vector2.zero, fontSize, interactable ? textWhite : textMuted, TextAlignmentOptions.Center, size - new Vector2(24f, 16f));
+
+        return button;
+    }
+
+    private RectTransform CreatePanel(string name, Vector2 size, Vector2 position, Color color)
+    {
+        GameObject panelObject = new GameObject(name);
+        panelObject.transform.SetParent(contentRoot, false);
+
+        RectTransform rectTransform = panelObject.AddComponent<RectTransform>();
+        rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+        rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+        rectTransform.pivot = new Vector2(0.5f, 0.5f);
+        rectTransform.sizeDelta = size;
+        rectTransform.anchoredPosition = position;
+
+        Image image = panelObject.AddComponent<Image>();
+        image.color = color;
+
+        return rectTransform;
+    }
+
+    private TMP_Text CreateLabel(string text, RectTransform parent, Vector2 position, int fontSize, Color color, TextAlignmentOptions alignment, Vector2 size)
+    {
+        GameObject labelObject = new GameObject("Text");
+        labelObject.transform.SetParent(parent, false);
+
+        RectTransform rectTransform = labelObject.AddComponent<RectTransform>();
+        rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+        rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+        rectTransform.pivot = new Vector2(0.5f, 0.5f);
+        rectTransform.sizeDelta = size;
+        rectTransform.anchoredPosition = position;
+
+        TextMeshProUGUI textComponent = labelObject.AddComponent<TextMeshProUGUI>();
+        textComponent.text = text;
+        textComponent.color = color;
+        textComponent.alignment = alignment;
+        textComponent.fontSize = fontSize;
+        textComponent.enableAutoSizing = true;
+        textComponent.fontSizeMax = fontSize;
+        textComponent.fontSizeMin = 14f;
+        textComponent.enableWordWrapping = true;
+        textComponent.raycastTarget = false;
+
+        return textComponent;
+    }
+
+    private void AddBackdrop()
+    {
+        GameObject backdropObject = new GameObject("Backdrop");
+        backdropObject.transform.SetParent(contentRoot, false);
+
+        RectTransform rectTransform = backdropObject.AddComponent<RectTransform>();
+        rectTransform.anchorMin = new Vector2(0.5f, 0.5f);
+        rectTransform.anchorMax = new Vector2(0.5f, 0.5f);
+        rectTransform.pivot = new Vector2(0.5f, 0.5f);
+        rectTransform.sizeDelta = ResolvePositiveSize(backdropSize, screenSize);
+        rectTransform.anchoredPosition = backdropOffset;
+
+        Image image = backdropObject.AddComponent<Image>();
+        image.color = clearBlack;
+        image.raycastTarget = false;
+
+        if (!showSoftCenterSurface)
+            return;
+
+        RectTransform softPanel = CreatePanel("Soft Center Surface", ResolvePositiveSize(softCenterSurfaceSize, new Vector2(screenSize.x - 80f, screenSize.y - 250f)), softCenterSurfaceOffset, new Color(0.02f, 0.025f, 0.023f, 0.32f));
+        Image softPanelImage = softPanel.GetComponent<Image>();
+
+        if (softPanelImage != null)
+            softPanelImage.raycastTarget = false;
+
+        softPanel.SetAsLastSibling();
+    }
+
+    private Vector2 ResolvePositiveSize(Vector2 requestedSize, Vector2 fallbackSize)
+    {
+        return new Vector2(
+            requestedSize.x > 0f ? requestedSize.x : Mathf.Max(1f, fallbackSize.x),
+            requestedSize.y > 0f ? requestedSize.y : Mathf.Max(1f, fallbackSize.y));
+    }
+
+    private void ClearContent()
+    {
+        if (contentRoot == null)
+            return;
+
+        for (int i = contentRoot.childCount - 1; i >= 0; i--)
+        {
+            Transform child = contentRoot.GetChild(i);
+
+            if (Application.isPlaying)
+                Destroy(child.gameObject);
+            else
+                DestroyImmediate(child.gameObject);
+        }
+    }
+
+    private void EnsureBuilt()
+    {
+        if (screenRoot == null)
+            BuildScreen();
+    }
+
+    private void SetScreenVisible(bool isVisible)
+    {
+        if (screenRoot != null)
+            screenRoot.SetActive(isVisible);
+    }
+
+    private void SetGameplayActive(bool isActive)
+    {
+        if (gameplayRootToEnable != null)
+            gameplayRootToEnable.SetActive(isActive);
+
+        if (gameplayObjectsToEnable == null)
+            return;
+
+        for (int i = 0; i < gameplayObjectsToEnable.Length; i++)
+        {
+            if (gameplayObjectsToEnable[i] != null)
+                gameplayObjectsToEnable[i].SetActive(isActive);
+        }
+    }
+
+    private void PositionScreen()
+    {
+        if (screenRoot == null)
+            return;
+
+        if (screenAnchor != null)
+        {
+            screenRoot.transform.SetPositionAndRotation(screenAnchor.position, screenAnchor.rotation);
+            return;
+        }
+
+        if (placeInFrontOfPlayerOnStart)
+        {
+            RecenterScreenToPlayer();
+            return;
+        }
+
+        screenRoot.transform.localPosition = Vector3.zero;
+        screenRoot.transform.localRotation = Quaternion.identity;
+    }
+
+    private void RecenterScreenToPlayer()
+    {
+        Transform cameraTransform = ResolveCameraTransform();
+
+        if (cameraTransform == null || screenRoot == null)
+            return;
+
+        Vector3 forward = Vector3.ProjectOnPlane(cameraTransform.forward, Vector3.up);
+
+        if (forward.sqrMagnitude <= 0.0001f)
+            forward = cameraTransform.forward;
+
+        forward.Normalize();
+        Vector3 position = cameraTransform.position + forward * Mathf.Max(0.25f, screenDistanceFromPlayer);
+        position.y += screenHeightOffset;
+        screenRoot.transform.position = position;
+        screenRoot.transform.rotation = Quaternion.LookRotation(forward, Vector3.up);
+    }
+
+    private Camera ResolveCamera()
+    {
+        Transform cameraTransform = ResolveCameraTransform();
+        return cameraTransform != null ? cameraTransform.GetComponent<Camera>() : null;
+    }
+
+    private Transform ResolveCameraTransform()
+    {
+        if (playerCamera != null)
+            return playerCamera;
+
+        Camera mainCamera = Camera.main;
+        return mainCamera != null ? mainCamera.transform : null;
+    }
+
+    private void EnsureEventSystem()
+    {
+        EventSystem existingEventSystem = FindAnyObjectByType<EventSystem>();
+
+        if (existingEventSystem != null)
+        {
+            EnsureUiInputModule(existingEventSystem.gameObject);
+            return;
+        }
+
+        GameObject eventSystemObject = new GameObject("EventSystem");
+        eventSystemObject.AddComponent<EventSystem>();
+        EnsureUiInputModule(eventSystemObject);
+    }
+
+    private void EnsureUiInputModule(GameObject eventSystemObject)
+    {
+        if (AddOptionalComponent(eventSystemObject, "UnityEngine.InputSystem.UI.InputSystemUIInputModule, Unity.InputSystem"))
+            return;
+
+        Debug.LogWarning("[VRTrainingMenuScreen] Could not add InputSystemUIInputModule automatically. Add an Input System UI Input Module to your EventSystem if the VR menu cannot be clicked.");
+    }
+
+    private bool AddOptionalComponent(GameObject target, string typeName)
+    {
+        Type type = Type.GetType(typeName);
+
+        if (type == null || target.GetComponent(type) != null)
+            return type != null;
+
+        target.AddComponent(type);
+        return true;
+    }
+}

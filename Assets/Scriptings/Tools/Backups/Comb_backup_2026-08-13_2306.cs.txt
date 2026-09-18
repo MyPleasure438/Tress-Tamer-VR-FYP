@@ -1,0 +1,142 @@
+using UnityEngine;
+using UnityEngine.InputSystem;
+
+// HANDOFF NOTE:
+// Active comb/styling tool. It bends hair cards along comb movement and normally should not require a button in VR.
+// Preferred interaction area is combInteractionBoxes covering the comb teeth; fallback radius is for quick testing.
+public class Comb : BaseTool
+{
+    [Header("Cutting/Styling Engine Links")]
+    [Tooltip("Drag the Hair GameObject with the CuttingManager attached here")]
+    [SerializeField] private CuttingManager cuttingManager;
+    
+    [Tooltip("Create an empty GameObject at the center of the comb's teeth and drag it here")]
+    [SerializeField] private Transform combCenter;
+
+    [Tooltip("Optional. Assign narrow trigger/box colliders covering the comb teeth for more accurate combing.")]
+    [SerializeField] private BoxCollider[] combInteractionBoxes;
+
+    [Header("Comb Settings")]
+    [SerializeField] private float combStrength = 0.5f;
+    [SerializeField] private float fallbackInteractionRadius = 0.05f;
+    [SerializeField] private float minimumMovementToComb = 0.001f;
+    [SerializeField] private bool useInteractionBoxes = true;
+
+    [Header("Input")]
+    [Tooltip("Off is better for VR: the comb works when it moves through hair. On is useful for mouse testing.")]
+    [SerializeField] private bool requireLeftMouseButton = false;
+
+    private Vector3 lastPosition;
+    private bool hasLastPosition;
+
+    private bool isCombing;
+
+    void Update()
+    {
+        if (cuttingManager == null || combCenter == null)
+            return;
+
+        bool shouldComb = ShouldCombThisFrame();
+
+        if (!shouldComb)
+        {
+            isCombing = false;
+            hasLastPosition = false;
+            return;
+        }
+
+        Vector3 currentPosition = combCenter.position;
+
+        if (!hasLastPosition)
+        {
+            lastPosition = currentPosition;
+            hasLastPosition = true;
+            return;
+        }
+
+        Vector3 movementDelta = currentPosition - lastPosition;
+        lastPosition = currentPosition;
+
+        if (movementDelta.sqrMagnitude < minimumMovementToComb * minimumMovementToComb)
+            return;
+
+        int affectedHairCards = 0;
+
+        // Box path is more accurate for the teeth. Radius path is a simpler fallback.
+        if (useInteractionBoxes && combInteractionBoxes != null && combInteractionBoxes.Length > 0)
+            affectedHairCards = cuttingManager.ExecuteHairCardMeshCombBoxes(combInteractionBoxes, movementDelta, combStrength);
+        else
+            affectedHairCards = cuttingManager.ExecuteHairCardMeshComb(currentPosition, fallbackInteractionRadius, movementDelta, combStrength);
+
+        if (affectedHairCards <= 0)
+            return;
+
+        if (!isCombing)
+        {
+            isCombing = true;
+            Debug.Log("[Comb] Started combing hair cards.");
+        }
+
+        playHapticFeedback(Time.deltaTime);
+    }
+
+    private bool ShouldCombThisFrame()
+    {
+        if (!requireLeftMouseButton)
+            return true;
+
+        return Mouse.current != null && Mouse.current.leftButton.isPressed;
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        if (useInteractionBoxes && combInteractionBoxes != null && combInteractionBoxes.Length > 0)
+        {
+            Gizmos.color = Color.green;
+
+            for (int i = 0; i < combInteractionBoxes.Length; i++)
+            {
+                BoxCollider box = combInteractionBoxes[i];
+
+                if (box == null)
+                    continue;
+
+                Matrix4x4 previousMatrix = Gizmos.matrix;
+                Gizmos.matrix = Matrix4x4.TRS(box.transform.position, box.transform.rotation, box.transform.lossyScale);
+                Gizmos.DrawWireCube(box.center, box.size);
+                Gizmos.matrix = previousMatrix;
+            }
+
+            return;
+        }
+
+        if (combCenter == null)
+            return;
+
+        Gizmos.color = Color.green;
+        Gizmos.DrawWireSphere(combCenter.position, fallbackInteractionRadius);
+    }
+
+    void Start()
+    {
+        hapticIntensity = 3;
+        toolID = 4;
+        //toolModel = 
+        //toolAnimator = 
+    }
+
+    public override void useTool()
+    {
+        // Framework hook if needed
+    }
+    
+    public override int getCurrentToolID()
+    {
+        return toolID; // Returns 4 to match your toolID setting
+    }
+
+    public override void playHapticFeedback(float duration)
+    {
+        // VR controller hook
+    }  
+}

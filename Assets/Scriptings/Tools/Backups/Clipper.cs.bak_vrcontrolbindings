@@ -1,0 +1,365 @@
+using UnityEngine;
+using System.Collections;
+using UnityEngine.InputSystem;
+using UnityEngine.XR.Interaction.Toolkit.Interactables;
+
+// HANDOFF NOTE:
+// Active electric clipper tool. It cuts repeatedly while on, unlike Scissor which cuts once per snip.
+// Desktop testing can use left mouse. VR should call ToggleClipper(), StartClipper(), or StopClipper()
+// from XR Grab Interactable events depending on whether one-press toggle or press-and-hold feels better.
+public class Clipper : BaseTool
+{
+    [Header("Grab State")]
+    [Tooltip("Auto-found on Start if left empty. The mouse-testing input path only works while this clipper is actually being held - prevents an unheld clipper from reacting to global input meant for a different held tool.")]
+    [SerializeField] private XRGrabInteractable grabInteractable;
+
+    // Active dependencies for the CuttingManager-based hair-card cutting engine.
+    [Header("Cutting Engine Links")]
+    [Tooltip("Drag the Hair GameObject with the CuttingManager attached here")]
+    [SerializeField] private CuttingManager cuttingManager;
+    
+    [Tooltip("Create an empty GameObject at the clipper's shaving head and drag it here")]
+    [SerializeField] private Transform clipperBladeTip;
+    
+    [Tooltip("Fallback size when no cut area boxes are assigned.")]
+    [SerializeField] private float cutRadius = 0.04f;
+
+    [Tooltip("Length of the fallback cutting cylinder along the blade tip's up direction.")]
+    [SerializeField] private float cutCylinderLength = 0.05f;
+
+    [Tooltip("Optional. Assign one or more box colliders around the clipper blade for accurate shaving.")]
+    [SerializeField] private BoxCollider[] cutAreaBoxes;
+
+    [Tooltip("Optional. If assigned, cuts will be driven by the currently selected guard length instead of the hairstyle's flat per-zone target - matches how a real clipper guard works. Leave empty to fall back to old behavior.")]
+    [SerializeField] private ClipperGuardController clipperGuardController;
+
+    [Header("Clipper Engine Settings")]
+    [Tooltip("How often does the clipper calculate cuts (in seconds)? Lower = smoother but heavier on CPU.")]
+    [SerializeField] private float cutInterval = 0.05f;
+
+    [Tooltip("On for mouse testing. Off when using XR Activate events.")]
+    [SerializeField] private bool useLeftMouseButton = true;
+
+    [Tooltip("If on, pressing activate once turns the clipper on/off. If off, call StartClipper on activate and StopClipper on deactivate.")]
+    [SerializeField] private bool toggleOnUse = true;
+
+    [Header("Continuous Buzz Sound")]
+    [Tooltip("Looping sound played while the clipper is on, stops when turned off. Auto-found (AudioSource on this GameObject) if left empty.")]
+    [SerializeField] private AudioSource buzzAudioSource;
+    [SerializeField] private AudioClip buzzClip;
+    [Tooltip("Normal pitch while idling/moving without actually cutting anything.")]
+    [SerializeField] private float idlePitch = 1f;
+    [Tooltip("Subtle pitch dip on the base motor loop while actively cutting - keep this close to 1 (e.g. 0.92-0.95). Dropping it too far makes the motor sound like it's dying rather than working hard.")]
+    [SerializeField] private float cuttingPitch = 0.93f;
+    [Tooltip("How quickly pitch/volume smoothly transition (units per second) instead of snapping instantly - higher is snappier, lower is smoother.")]
+    [SerializeField] private float audioTransitionSpeed = 4f;
+
+    [Header("Cutting Crunch Layer (second AudioSource)")]
+    [Tooltip("Turn the crunch layer off entirely to test whether the pitch dip alone sounds right on its own, isolated from this layer.")]
+    [SerializeField] private bool enableCrunchLayer = true;
+    [Tooltip("Second AudioSource for a subtle continuous crunch/snip texture layered UNDER the motor loop while actively cutting, crossfaded in/out smoothly. Auto-created on Start if left empty.")]
+    [SerializeField] private AudioSource crunchAudioSource;
+    [SerializeField] private AudioClip crunchClip;
+    [Tooltip("Volume the crunch layer crossfades up to while cutting (loop mode) or plays at (one-shot mode) - keep subtle, it's a texture layer, not the main sound.")]
+    [Range(0f, 1f)]
+    [SerializeField] private float crunchVolume = 0.35f;
+    [Tooltip("Pitch of the crunch layer specifically - separate from the base motor's pitch above.")]
+    [SerializeField] private float crunchPitch = 1f;
+    [Tooltip("If on (default), the crunch layer plays continuously in the background and crossfades its volume in/out smoothly. If off, it instead plays as a single quick one-shot sound each time cutting starts, rather than looping.")]
+    [SerializeField] private bool useLoopForCrunch = true;
+
+    private bool _isCuttingFeedbackActive;
+    private bool _wasCuttingLastCheck;
+    private float _crunchOneShotFinishTime = -1f;
+
+    private bool isClipperOn = false;
+    private Coroutine clipperRoutine;
+
+    void Update()
+    {
+        // Runs regardless of desktop-testing mouse input, since audio should keep smoothing
+        // continuously for as long as the clipper is actually on.
+        UpdateAudioFeedback();
+
+        if (!useLeftMouseButton || Mouse.current == null || !IsCurrentlyHeld())
+            return;
+
+        if (toggleOnUse)
+        {
+            if (Mouse.current.leftButton.wasPressedThisFrame)
+                ToggleClipper();
+
+            return;
+        }
+
+        if (Mouse.current.leftButton.wasPressedThisFrame && !isClipperOn)
+            StartClipper();
+
+        if (Mouse.current != null && Mouse.current.leftButton.wasReleasedThisFrame && isClipperOn)
+            StopClipper();
+    }
+
+    private void OnDisable()
+    {
+        StopClipper();
+    }
+
+    private bool IsCurrentlyHeld()
+    {
+        return grabInteractable != null && grabInteractable.isSelected;
+    }
+
+    public void ToggleClipper()
+    {
+        if (isClipperOn)
+            StopClipper();
+        else
+            StartClipper();
+    }
+
+    public void StartClipper()
+    {
+        if (isClipperOn)
+            return;
+
+        isClipperOn = true;
+        Debug.Log("[Clipper] BZZZZZ! Clipper turned on.");
+        clipperRoutine = StartCoroutine(ContinuousShaveRoutine());
+        _isCuttingFeedbackActive = false;
+
+        if (buzzAudioSource != null && buzzClip != null)
+        {
+            buzzAudioSource.clip = buzzClip;
+            buzzAudioSource.loop = true;
+            buzzAudioSource.pitch = idlePitch;
+            buzzAudioSource.Play();
+        }
+
+        // Start the crunch layer playing immediately too, but silent (volume 0) - it's already
+        // running and in sync, ready to crossfade smoothly the instant cutting starts, rather than
+        // starting fresh (and potentially out of phase) each time a cut begins.
+        if (useLoopForCrunch && enableCrunchLayer && crunchAudioSource != null && crunchClip != null)
+        {
+            crunchAudioSource.clip = crunchClip;
+            crunchAudioSource.loop = true;
+            crunchAudioSource.pitch = crunchPitch;
+            crunchAudioSource.volume = 0f;
+            crunchAudioSource.Play();
+        }
+    }
+
+    public void StopClipper()
+    {
+        if (!isClipperOn)
+            return;
+
+        isClipperOn = false;
+        Debug.Log("[Clipper] Clipper turned off.");
+        _isCuttingFeedbackActive = false;
+
+        if (buzzAudioSource != null)
+            buzzAudioSource.Stop();
+
+        if (crunchAudioSource != null)
+            crunchAudioSource.Stop();
+
+        if (clipperRoutine != null)
+        {
+            StopCoroutine(clipperRoutine);
+            clipperRoutine = null;
+        }
+    }
+
+    /// <summary>
+    /// Loops continuously, firing the cutting calculation at a fixed time interval
+    /// </summary>
+    IEnumerator ContinuousShaveRoutine()
+    {
+        while (isClipperOn)
+        {
+            if (cuttingManager != null && clipperBladeTip != null)
+            {
+                // Keep runtime work in CuttingManager so scissor and clipper share target-limit/scoring rules.
+                playHapticFeedback(cutInterval);
+                yield return TriggerClipperCut();
+            }
+            else
+            {
+                Debug.LogWarning($"[Clipper] Cut loop ticking but missing references on {gameObject.name}!");
+            }
+
+            // Wait for a fraction of a second before checking/shaving again
+            yield return new WaitForSeconds(cutInterval);
+        }
+    }
+
+    private IEnumerator TriggerClipperCut()
+    {
+        Vector3 cutPosition = clipperBladeTip.position;
+        Vector3 cutDirection = clipperBladeTip.up;
+
+        // Convert the selected guard (cm) to meters to match CuttingManager's units. Null when no guard
+        // controller is assigned, which preserves old flat-target behavior exactly as before.
+        float? guardTargetLengthMeters = clipperGuardController != null
+            ? clipperGuardController.CurrentGuardCm / 100f
+            : (float?)null;
+
+        if (HasCutAreaBoxes())
+        {
+            int boxesCutCount = 0;
+            yield return cuttingManager.ExecuteHairCardMeshCutBoxesRoutine(cutAreaBoxes, cutDirection, count => boxesCutCount = count, guardTargetLengthMeters);
+            ApplyCuttingPitchFeedback(boxesCutCount > 0);
+            yield break;
+        }
+
+        int cylinderCutCount = cuttingManager.ExecuteHairCardMeshCutCylinder(cutPosition, cutDirection, cutCylinderLength, cutRadius, guardTargetLengthMeters);
+        ApplyCuttingPitchFeedback(cylinderCutCount > 0);
+    }
+
+    // Sets the TARGET cutting-feedback state (checked periodically, every cutInterval) - actual
+    // pitch/volume smoothing toward this target happens every frame in UpdateAudioFeedback(), not here.
+    // In one-shot mode (useLoopForCrunch = false), this also fires the crunch sound once, right on
+    // the rising edge (the moment cutting STARTS) - not every single cutInterval tick, which would
+    // otherwise overlap/spam the sound while continuously cutting.
+    private void ApplyCuttingPitchFeedback(bool didCutSomething)
+    {
+        bool crunchStillPlaying = !useLoopForCrunch && Time.time < _crunchOneShotFinishTime;
+
+        // Only start a NEW crunch sound if the previous one has already fully finished playing -
+        // even if cutting a second hair card creates a fresh rising edge in the meantime, it must
+        // wait its turn rather than overlapping/cutting off the currently-playing one.
+        if (!useLoopForCrunch && didCutSomething && !crunchStillPlaying && crunchAudioSource != null && crunchClip != null)
+        {
+            crunchAudioSource.pitch = crunchPitch;
+            crunchAudioSource.PlayOneShot(crunchClip, crunchVolume);
+
+            // Pitch affects playback speed too, so account for it when working out how long the
+            // clip will actually take to finish playing.
+            float actualDuration = crunchClip.length / Mathf.Max(0.01f, Mathf.Abs(crunchPitch));
+            _crunchOneShotFinishTime = Time.time + actualDuration;
+            crunchStillPlaying = true;
+        }
+
+        // In one-shot mode, don't let the feedback state (and therefore the motor's pitch) drop
+        // back to idle until the crunch sound has fully finished playing, even if the underlying
+        // cut-check already says cutting has stopped - keeps the motor's deeper pitch consistent
+        // with what's actually still audibly playing, instead of snapping back while it's mid-sound.
+        _isCuttingFeedbackActive = didCutSomething || crunchStillPlaying;
+
+        _wasCuttingLastCheck = didCutSomething;
+    }
+
+    // Smoothly interpolates the base motor pitch and crossfades the crunch layer toward whatever
+    // state ApplyCuttingPitchFeedback last set - runs every frame regardless of desktop-testing
+    // mouse input, since audio should smooth continuously while the clipper is on.
+    private void UpdateAudioFeedback()
+    {
+        float targetPitch = _isCuttingFeedbackActive ? cuttingPitch : idlePitch;
+
+        if (buzzAudioSource != null)
+            buzzAudioSource.pitch = Mathf.MoveTowards(buzzAudioSource.pitch, targetPitch, audioTransitionSpeed * Time.deltaTime);
+
+        // Only handle the continuous crossfade in loop mode - in one-shot mode, the crunch sound is
+        // fired directly via PlayOneShot in ApplyCuttingPitchFeedback instead, nothing to smooth here.
+        if (useLoopForCrunch && crunchAudioSource != null)
+        {
+            crunchAudioSource.pitch = crunchPitch;
+            float targetCrunchVolume = (_isCuttingFeedbackActive && enableCrunchLayer) ? crunchVolume : 0f;
+            crunchAudioSource.volume = Mathf.MoveTowards(crunchAudioSource.volume, targetCrunchVolume, audioTransitionSpeed * Time.deltaTime);
+        }
+    }
+
+    private bool HasCutAreaBoxes()
+    {
+        if (cutAreaBoxes == null)
+            return false;
+
+        for (int i = 0; i < cutAreaBoxes.Length; i++)
+        {
+            if (cutAreaBoxes[i] != null && cutAreaBoxes[i].enabled)
+                return true;
+        }
+
+        return false;
+    }
+
+    private void OnDrawGizmosSelected()
+    {
+        Gizmos.color = Color.blue;
+
+        if (HasCutAreaBoxes())
+        {
+            Matrix4x4 oldMatrix = Gizmos.matrix;
+
+            for (int i = 0; i < cutAreaBoxes.Length; i++)
+            {
+                BoxCollider box = cutAreaBoxes[i];
+
+                if (box == null || !box.enabled)
+                    continue;
+
+                Gizmos.matrix = box.transform.localToWorldMatrix;
+                Gizmos.DrawWireCube(box.center, box.size);
+            }
+
+            Gizmos.matrix = oldMatrix;
+            return;
+        }
+
+        if (clipperBladeTip == null)
+            return;
+
+        Vector3 cutAxis = clipperBladeTip.up.normalized;
+        Vector3 cylinderHalf = cutAxis * (cutCylinderLength * 0.5f);
+        Vector3 cylinderStart = clipperBladeTip.position - cylinderHalf;
+        Vector3 cylinderEnd = clipperBladeTip.position + cylinderHalf;
+
+        Gizmos.DrawWireSphere(cylinderStart, cutRadius);
+        Gizmos.DrawWireSphere(cylinderEnd, cutRadius);
+
+        if (clipperBladeTip != null)
+        {
+            Gizmos.DrawLine(cylinderStart + clipperBladeTip.right * cutRadius, cylinderEnd + clipperBladeTip.right * cutRadius);
+            Gizmos.DrawLine(cylinderStart - clipperBladeTip.right * cutRadius, cylinderEnd - clipperBladeTip.right * cutRadius);
+            Gizmos.DrawLine(cylinderStart + clipperBladeTip.forward * cutRadius, cylinderEnd + clipperBladeTip.forward * cutRadius);
+            Gizmos.DrawLine(cylinderStart - clipperBladeTip.forward * cutRadius, cylinderEnd - clipperBladeTip.forward * cutRadius);
+        }
+    }
+
+    void Start()
+    {
+        hapticIntensity = 3;
+        toolID = 3;
+
+        if (grabInteractable == null)
+            grabInteractable = GetComponent<XRGrabInteractable>();
+
+        if (buzzAudioSource == null)
+            buzzAudioSource = GetComponent<AudioSource>();
+
+        if (crunchAudioSource == null)
+        {
+            // Add a second AudioSource specifically for the crunch layer, separate from the
+            // existing one used for the base motor loop, so both can play simultaneously.
+            crunchAudioSource = gameObject.AddComponent<AudioSource>();
+            crunchAudioSource.spatialBlend = buzzAudioSource != null ? buzzAudioSource.spatialBlend : 1f;
+        }
+        //toolModel = 
+        //toolAnimator = 
+    }
+
+    public override void useTool()
+    {
+        ToggleClipper();
+    }
+    
+    public override int getCurrentToolID()
+    {
+        return toolID; // Updated to match your toolID setting
+    }
+
+    public override void playHapticFeedback(float duration)
+    {
+        // Left empty for your VR controller haptic implementation
+    }  
+}

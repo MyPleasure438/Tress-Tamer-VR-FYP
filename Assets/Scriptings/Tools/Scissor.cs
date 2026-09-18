@@ -1,0 +1,402 @@
+using UnityEngine;
+using UnityEngine.UIElements;
+using UnityEngine.XR.Interaction.Toolkit.Interactables;
+using System.Collections;
+using UnityEngine.InputSystem;
+
+// HANDOFF NOTE:
+// Active scissor tool for the current VR haircut flow.
+// Desktop testing uses left mouse click; VR should call TriggerCut() from XR Grab Interactable Activate.
+// Preferred cutting area is cutAreaBoxes. scissorTip/radius/cylinder are fallback or preview support.
+public class Scissor : BaseTool
+{
+    [Header("Grab State")]
+    [Tooltip("Auto-found on Start if left empty. Cutting/brushing only happens while this scissor is actually being held - prevents accidental cuts from a scissor sitting on a table/floor.")]
+    [SerializeField] private XRGrabInteractable grabInteractable;
+
+    [Header("Blade References")]
+    public Transform leftBlade;
+    public Transform rightBlade;
+
+    [Header("Animation Settings")]
+    public float openAngle = 10f;       // Angle when fully open
+    public float closedAngle = 0f;      // Angle when fully closed
+    public float snipSpeed = 5f;        // How fast it cuts
+
+    private bool isSnipping = false;
+
+    // Cache variables to store original X and Y angles
+    private Vector3 leftBladeStartAngles;
+    private Vector3 rightBladeStartAngles;
+
+    // Cache variables for original Positions
+    private Vector3 leftBladeStartPos;
+    private Vector3 rightBladeStartPos;
+
+    // Active dependencies for the CuttingManager-based hair-card cutting engine.
+    [Header("Cutting Engine Links")]
+    [Tooltip("Drag the Hair GameObject with the CuttingManager attached here")]
+    [SerializeField] private CuttingManager cuttingManager;
+    
+    [Tooltip("Create an empty GameObject at the scissor tip and drag it here")]
+    [SerializeField] private Transform scissorTip;
+    
+    [Tooltip("Radius/thickness of the scissor cutting cylinder.")]
+    [SerializeField] private float cutRadius = 0.02f;
+
+    [Tooltip("Length of the scissor cutting cylinder along the scissor tip's up direction.")]
+    [SerializeField] private float cutCylinderLength = 0.08f;
+
+    [Tooltip("Optional. If assigned, these boxes replace the cylinder as the scissor cutting area.")]
+    [SerializeField] private BoxCollider[] cutAreaBoxes;
+
+    [Tooltip("Shows the part of the hair card that will be removed by the cut boxes.")]
+    [SerializeField] private bool showCutPreview = true;
+
+    [Header("Cut Sounds")]
+    [SerializeField] private AudioSource snipAudioSource;
+    [SerializeField] private AudioClip snipClip;
+    [SerializeField] private bool playSoundWhenNothingIsCut = true;
+    // If enabled, a second delayed sound layer is added for thicker hair-cut feedback.
+    [SerializeField] private bool layerHairCutSound = false;
+    [SerializeField] private float emptySnipVolume = 0.6f;
+    [SerializeField] private float emptySnipPitch = 1.05f;
+    [SerializeField] private float hairCutVolume = 1f;
+    [SerializeField] private float hairCutPitch = 0.95f;
+    [SerializeField] private float hairCutThickLayerPitch = 0.82f;
+    [SerializeField] private float hairCutThickLayerDelay = 0.025f;
+
+    [Header("Hair Brushing")]
+    [SerializeField] private bool enableTouchBrushing = true;
+    [SerializeField] private float brushRadius = 0.04f;
+    [SerializeField] private float brushStrength = 1f;
+    [SerializeField] private float minimumBrushMovement = 0.001f;
+    [SerializeField] private float brushUpdateInterval = 0.05f;
+
+    [Header("Preview Performance")]
+    [SerializeField] private float cutPreviewUpdateInterval = 0.12f;
+
+    private Vector3 previousScissorTipPosition;
+    private bool hasPreviousScissorTipPosition;
+    private float nextBrushUpdateTime;
+    private float nextCutPreviewUpdateTime;
+
+    void Update()
+    {
+        // Mouse path is only for editor/desktop testing. In VR, use XR Activate to call TriggerCut().
+        if (Mouse.current != null && Mouse.current.leftButton.wasPressedThisFrame && !isSnipping)
+        {
+            TriggerCut();
+        }
+
+        ApplyTouchBrushing();
+        UpdateCutPreview();
+    }
+
+    public void TriggerCut()
+    {
+        if (!IsCurrentlyHeld())
+            return;
+
+        if (!isSnipping)
+            StartCoroutine(SnipRoutine());
+    }
+
+    private bool IsCurrentlyHeld()
+    {
+        return grabInteractable != null && grabInteractable.isSelected;
+    }
+
+    private void OnDisable()
+    {
+        if (cuttingManager != null)
+            cuttingManager.ClearHairCardMeshCutPreview();
+    }
+
+    IEnumerator SnipRoutine()
+    {
+        Debug.Log("snipRoutine entered");
+        isSnipping = true;
+
+        // 1. Close the scissors
+        float elapsedTime = 0f;
+        while (elapsedTime < 1f)
+        {
+            elapsedTime += Time.deltaTime * snipSpeed;
+            SetBladeAngles(Mathf.Lerp(openAngle, closedAngle, elapsedTime));
+            yield return null;
+        }
+
+        SetBladeAngles(closedAngle);
+
+        yield return TriggerCutRegistration();
+
+        // 2. Open the scissors back up
+        elapsedTime = 0f;
+        while (elapsedTime < 1f)
+        {
+            elapsedTime += Time.deltaTime * snipSpeed;
+            SetBladeAngles(Mathf.Lerp(closedAngle, openAngle, elapsedTime));
+            yield return null;
+        }
+
+        SetBladeAngles(openAngle);
+        
+        isSnipping = false;
+    }
+
+    void SetBladeAngles(float currentAngle)
+    {
+        // Adjust the 'Y' axis to whatever axis your model rotates on (X, Y, or Z)
+        leftBlade.localRotation = Quaternion.Euler(leftBladeStartAngles.x, leftBladeStartAngles.y, currentAngle);
+        rightBlade.localRotation = Quaternion.Euler(rightBladeStartAngles.x, rightBladeStartAngles.y, -currentAngle);
+        // FORCE the positions to remain exactly what they were originally
+        leftBlade.localPosition = leftBladeStartPos;
+        rightBlade.localPosition = rightBladeStartPos;
+    
+    }
+    
+    void Start()
+    {
+        hapticIntensity = 3;
+        toolID = 5;
+
+        if (grabInteractable == null)
+            grabInteractable = GetComponent<XRGrabInteractable>();
+        //toolModel = 
+        //toolAnimator = 
+
+        if (leftBlade != null)
+        {
+            leftBladeStartAngles = leftBlade.localEulerAngles;
+            leftBladeStartPos = leftBlade.localPosition;
+        }
+
+        if (rightBlade != null)
+        {
+            rightBladeStartAngles = rightBlade.localEulerAngles;
+            rightBladeStartPos = rightBlade.localPosition;
+        }
+
+        if (snipAudioSource == null)
+            snipAudioSource = GetComponent<AudioSource>();
+
+        if (snipClip == null && snipAudioSource != null)
+            snipClip = snipAudioSource.clip;
+
+        if (scissorTip != null)
+        {
+            previousScissorTipPosition = scissorTip.position;
+            hasPreviousScissorTipPosition = true;
+        }
+    }
+
+    private void ApplyTouchBrushing()
+    {
+        if (!enableTouchBrushing || cuttingManager == null || scissorTip == null || !IsCurrentlyHeld())
+            return;
+
+        if (Time.time < nextBrushUpdateTime)
+            return;
+
+        nextBrushUpdateTime = Time.time + brushUpdateInterval;
+
+        Vector3 currentTipPosition = scissorTip.position;
+
+        if (!hasPreviousScissorTipPosition)
+        {
+            previousScissorTipPosition = currentTipPosition;
+            hasPreviousScissorTipPosition = true;
+            return;
+        }
+
+        Vector3 movementDelta = currentTipPosition - previousScissorTipPosition;
+        previousScissorTipPosition = currentTipPosition;
+
+        if (movementDelta.sqrMagnitude < minimumBrushMovement * minimumBrushMovement)
+            return;
+
+        cuttingManager.ExecuteHairCardMeshBrush(currentTipPosition, brushRadius, movementDelta, brushStrength);
+    }
+
+    private void UpdateCutPreview()
+    {
+        if (cuttingManager == null)
+            return;
+
+        if (Time.time < nextCutPreviewUpdateTime)
+            return;
+
+        nextCutPreviewUpdateTime = Time.time + cutPreviewUpdateInterval;
+
+        if (showCutPreview && HasCutAreaBoxes())
+        {
+            Vector3 cutDirection = scissorTip != null ? scissorTip.up : transform.up;
+            cuttingManager.UpdateHairCardMeshCutBoxPreview(cutAreaBoxes, cutDirection);
+        }
+        else
+        {
+            cuttingManager.ClearHairCardMeshCutPreview();
+        }
+    }
+     
+    /// Grabs the tip position and pushes it directly into your custom matrix arrays
+    /// </summary>
+    private IEnumerator TriggerCutRegistration()
+    {
+        Debug.Log($"[Scissor Debug] TriggerCut called. Manager: {cuttingManager != null}, Tip: {scissorTip != null}");
+        if (cuttingManager != null && scissorTip != null)
+        {
+            // Play your haptic snippet or snip sounds here if needed!
+            playHapticFeedback(0.1f);
+            
+            // 1. Where is the blade tip right now?
+            Vector3 cutPosition = scissorTip.transform.position; 
+
+            // 2. Which way is the blade facing? (Usually transform.up or transform.forward)
+            Vector3 cutDirection = scissorTip.transform.up;
+            //Vector3 cutDirection = scissorTip.transform.forward;
+            int cutCount = 0;
+
+            if (HasCutAreaBoxes())
+            {
+                cuttingManager.ClearHairCardMeshCutPreview();
+                yield return cuttingManager.ExecuteHairCardMeshCutBoxesRoutine(cutAreaBoxes, cutDirection, completedCutCount => cutCount = completedCutCount);
+            }
+            else
+            {
+                // Execute cut along a short cylinder where the blades meet
+                //cuttingManager.ExecuteCut(scissorTip.position, cutRadius);
+                cutCount = cuttingManager.ExecuteHairCardMeshCutCylinder(cutPosition, cutDirection, cutCylinderLength, cutRadius);
+                //cuttingManager.ExecuteCutWithSlicing(cutPosition, Vector3.up);
+            }
+
+            if (cutCount > 0)
+                PlayHairCutSound();
+            else if (playSoundWhenNothingIsCut)
+                PlayEmptySnipSound();
+        }
+        else
+        {
+            Debug.LogWarning($"[Scissor] Cut skipped! Missing CuttingManager or ScissorTip reference on {gameObject.name}");
+        }
+    }
+
+    private void PlayEmptySnipSound()
+    {
+        if (snipAudioSource == null || snipClip == null)
+            return;
+
+        StopCoroutine(nameof(PlayThickHairCutSoundRoutine));
+        PlayOneShotWithSettings(emptySnipPitch, emptySnipVolume);
+    }
+
+    private void PlayHairCutSound()
+    {
+        if (snipAudioSource == null || snipClip == null)
+            return;
+
+        StopCoroutine(nameof(PlayThickHairCutSoundRoutine));
+
+        if (layerHairCutSound)
+            StartCoroutine(PlayThickHairCutSoundRoutine());
+        else
+            PlayOneShotWithSettings(hairCutPitch, hairCutVolume);
+    }
+
+    private IEnumerator PlayThickHairCutSoundRoutine()
+    {
+        PlayOneShotWithSettings(hairCutPitch, hairCutVolume);
+
+        if (hairCutThickLayerDelay > 0f)
+            yield return new WaitForSeconds(hairCutThickLayerDelay);
+
+        PlayOneShotWithSettings(hairCutThickLayerPitch, hairCutVolume * 0.75f);
+    }
+
+    private void PlayOneShotWithSettings(float pitch, float volume)
+    {
+        snipAudioSource.pitch = Mathf.Max(0.1f, pitch);
+        snipAudioSource.PlayOneShot(snipClip, Mathf.Clamp01(volume));
+    }
+
+    private bool HasCutAreaBoxes()
+    {
+        if (cutAreaBoxes == null)
+            return false;
+
+        for (int i = 0; i < cutAreaBoxes.Length; i++)
+        {
+            if (cutAreaBoxes[i] != null && cutAreaBoxes[i].enabled)
+                return true;
+        }
+
+        return false;
+    }
+    
+    // Displays the cut radius sphere in the Editor window to simplify testing
+    private void OnDrawGizmosSelected()
+    {
+        if (scissorTip != null)
+        {
+            Gizmos.color = Color.red;
+            if (HasCutAreaBoxes())
+            {
+                DrawCutAreaBoxes();
+            }
+            else
+            {
+                Vector3 cutAxis = scissorTip.up.normalized;
+                Vector3 cylinderHalf = cutAxis * (cutCylinderLength * 0.5f);
+                Vector3 cylinderStart = scissorTip.position - cylinderHalf;
+                Vector3 cylinderEnd = scissorTip.position + cylinderHalf;
+                Gizmos.DrawWireSphere(cylinderStart, cutRadius);
+                Gizmos.DrawWireSphere(cylinderEnd, cutRadius);
+                Gizmos.DrawLine(cylinderStart + scissorTip.right * cutRadius, cylinderEnd + scissorTip.right * cutRadius);
+                Gizmos.DrawLine(cylinderStart - scissorTip.right * cutRadius, cylinderEnd - scissorTip.right * cutRadius);
+                Gizmos.DrawLine(cylinderStart + scissorTip.forward * cutRadius, cylinderEnd + scissorTip.forward * cutRadius);
+                Gizmos.DrawLine(cylinderStart - scissorTip.forward * cutRadius, cylinderEnd - scissorTip.forward * cutRadius);
+            }
+
+            Gizmos.color = Color.cyan;
+            Gizmos.DrawWireSphere(scissorTip.position, brushRadius);
+        }
+    }
+
+    private void DrawCutAreaBoxes()
+    {
+        Matrix4x4 oldMatrix = Gizmos.matrix;
+
+        for (int i = 0; i < cutAreaBoxes.Length; i++)
+        {
+            BoxCollider box = cutAreaBoxes[i];
+
+            if (box == null || !box.enabled)
+                continue;
+
+            Gizmos.matrix = box.transform.localToWorldMatrix;
+            Gizmos.DrawWireCube(box.center, box.size);
+        }
+
+        Gizmos.matrix = oldMatrix;
+    }
+
+
+
+
+    public override void useTool()
+    {
+        
+    }
+    
+    public override int getCurrentToolID()
+    {
+        return toolID;
+    }
+
+    public override void playHapticFeedback(float duration)
+    {
+        
+    }  
+
+}

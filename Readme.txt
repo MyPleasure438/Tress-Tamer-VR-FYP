@@ -1,0 +1,1 @@
+Just open Tress Tamer VR Executable Game File FYP folder, and double click the executable to start the game. Make sure VR is connected.
